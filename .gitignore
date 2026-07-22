@@ -16,6 +16,12 @@ output/*.bit
 output/*.bin
 output/*.ltx
 
+# Visualization render artifacts
+viz/out/
+viz/.venv/
+viz/__pycache__/
+*.pyc
+
 # Editor / OS
 .DS_Store
 *~

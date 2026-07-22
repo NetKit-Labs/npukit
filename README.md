@@ -1,6 +1,6 @@
 # NpuKit
 
-FPGA NPU kit for the [PYNQ-Z2](https://www.tulembedded.com/FPGA/ProductsPYNQ-Z2.html) (Xilinx Zynq-7020): a small, teachable **8×8 int8 output-stationary systolic array**, verified in simulation first, then loaded as a bitstream onto the board.
+FPGA NPU kit for the [PYNQ-Z2](https://www.tulembedded.com/FPGA/ProductsPYNQ-Z2.html) (Xilinx Zynq-7020): an **8×8 int8 output-stationary systolic array**, verified in simulation first, then loaded as a bitstream onto the board.
 
 Part of [NetKit Labs](https://github.com/NetKit-Labs) — companion direction to [netkit](https://github.com/NetKit-Labs/netkit) (embedded NN inference on MCU/MPU), focused here on **custom FPGA acceleration**.
 
@@ -64,12 +64,28 @@ Bitstream("/home/xilinx/jupyter_notebooks/npukit.bit").download()
 
 No Python Overlay / `.hwh` required for this MVP — use `Bitstream.download()`.
 
+## Visualize (Manim GIF)
+
+Cycle-accurate Manim animation of the 8×8 array (same skewed feed as `systolic_array_tb`):
+
+```bash
+# once
+python3.13 -m venv viz/.venv
+viz/.venv/bin/pip install manim numpy
+
+# render LinkedIn square MP4 + GIF → viz/out/
+viz/render_linkedin.sh
+```
+
+Outputs: `viz/out/systolic_8x8_manim.mp4` (1080², preferred for LinkedIn native video) and `viz/out/systolic_8x8_manim.gif`.
+
 ## Layout
 
 ```
 npukit/
   rtl/           pe.sv, systolic_array.sv, npukit_top.sv, npukit_pl.v
   sim/           pe_tb.sv, systolic_array_tb.sv
+  viz/           Manim scene + LinkedIn render script
   constraints/   pynq_z2.xdc
   scripts/       create_project.tcl, build_bitstream.tcl
   output/        bitstream artifacts (gitignored)
