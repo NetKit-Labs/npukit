@@ -15,6 +15,7 @@ sim/debug*
 output/*.bit
 output/*.bin
 output/*.ltx
+output/*.hwh
 
 # Visualization render artifacts
 viz/out/
