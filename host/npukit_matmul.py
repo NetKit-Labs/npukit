@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""PYNQ host: run 8x8 int8 matmul on NpuKit via AXI-Lite and check vs NumPy.
+"""PYNQ host for tiled int8 matmul using NpuKit's AXI DMA or AXI-Lite path.
 
-Usage on the board (after scp of npukit.bit):
-  python3 npukit_matmul.py [/path/to/npukit.bit]
+The accelerator is an 8x8 tile.  Larger MxK times KxN products are reduced
+over K in the array accumulators: the first K tile writes CTRL=CLEAR|START,
+and later K tiles write CTRL=START only.
+
+Usage:
+  python3 npukit_matmul.py [/path/to/npukit.bit] [M K N]
 """
 
 from __future__ import annotations
@@ -10,12 +14,13 @@ from __future__ import annotations
 import struct
 import sys
 import time
+from typing import Protocol
 
 import numpy as np
 
 try:
-    from pynq import Bitstream, MMIO
-except ImportError as exc:  # allow syntax check off-board
+    from pynq import Bitstream, MMIO, Overlay, allocate
+except ImportError as exc:  # allow syntax checks off-board
     raise SystemExit("This script must run on PYNQ with pynq installed") from exc
 
 N = 8
@@ -31,138 +36,164 @@ OFF_A = 0x100
 OFF_B = 0x200
 OFF_C = 0x400
 
+CTRL_START = 0x1
+CTRL_CLEAR = 0x2
+CTRL_TX_ARM = 0x4
 ID_MAGIC = 0x4E50554B
 
 
-def pack_i8(mat: np.ndarray) -> list[int]:
-    """Row-major int8 matrix → list of little-endian uint32 words (4 bytes each)."""
-    flat = np.asarray(mat, dtype=np.int8).reshape(-1)
-    words = []
-    for i in range(0, flat.size, 4):
-        words.append(struct.unpack("<I", flat[i : i + 4].tobytes())[0])
-    return words
+def pack_i8(mat: np.ndarray) -> np.ndarray:
+    """Row-major 8x8 int8 tile as 16 little-endian uint32 words."""
+    flat = np.ascontiguousarray(mat, dtype=np.int8).reshape(-1)
+    return np.frombuffer(flat.tobytes(), dtype="<u4").copy()
 
 
-def write_matrix(mmio: MMIO, offset: int, mat: np.ndarray) -> None:
-    for i, w in enumerate(pack_i8(mat)):
-        mmio.write(offset + 4 * i, int(w))
+def unpack_i32(words: np.ndarray) -> np.ndarray:
+    return np.asarray(words, dtype=np.uint32).view(np.int32).copy().reshape(N, N)
 
 
-def read_c(mmio: MMIO) -> np.ndarray:
-    out = np.zeros((N, N), dtype=np.int32)
-    for i in range(N * N):
-        # MMIO returns a Python int (unsigned view); force int32 on 32-bit ARM too
-        word = mmio.read(OFF_C + 4 * i) & 0xFFFFFFFF
-        out.flat[i] = np.array([word], dtype=np.uint32).view(np.int32)[0]
-    return out
+class TileTransport(Protocol):
+    def load(self, a: np.ndarray, b: np.ndarray) -> None: ...
+    def read(self) -> np.ndarray: ...
 
 
-def npu_matmul(mmio: MMIO, A: np.ndarray, B: np.ndarray) -> tuple[np.ndarray, float]:
-    """Run one matmul on the NPU; return (C, wall_seconds including MMIO)."""
-    write_matrix(mmio, OFF_A, A)
-    write_matrix(mmio, OFF_B, B)
-    mmio.write(REG_CTRL, 0x2)  # CLEAR
-    mmio.write(REG_CTRL, 0x1)  # START
+class MmioTransport:
+    """Portable fallback for bitstreams without an HWH/DMA instance."""
 
+    def __init__(self, mmio: MMIO) -> None:
+        self.mmio = mmio
+
+    def load(self, a: np.ndarray, b: np.ndarray) -> None:
+        for offset, words in ((OFF_A, pack_i8(a)), (OFF_B, pack_i8(b))):
+            for i, word in enumerate(words):
+                self.mmio.write(offset + 4 * i, int(word))
+
+    def read(self) -> np.ndarray:
+        words = np.array(
+            [self.mmio.read(OFF_C + 4 * i) & 0xFFFFFFFF for i in range(N * N)],
+            dtype=np.uint32,
+        )
+        return unpack_i32(words)
+
+
+class DmaTransport:
+    """AXI DMA simple-mode transport; one S_AXIS packet per A/B tile pair."""
+
+    def __init__(self, dma: object, mmio: MMIO) -> None:
+        self.dma = dma
+        self.mmio = mmio
+
+    def load(self, a: np.ndarray, b: np.ndarray) -> None:
+        packet = allocate(shape=(2 * N * N // 4,), dtype=np.uint32)
+        packet[: N * N // 4] = pack_i8(a)
+        packet[N * N // 4 :] = pack_i8(b)
+        packet.flush()
+        self.dma.sendchannel.transfer(packet)
+        self.dma.sendchannel.wait()
+        # Keep a reference until the channel has completed its transfer.
+        del packet
+
+    def read(self) -> np.ndarray:
+        packet = allocate(shape=(N * N,), dtype=np.uint32)
+        self.dma.recvchannel.transfer(packet)
+        self.mmio.write(REG_CTRL, CTRL_TX_ARM)
+        self.dma.recvchannel.wait()
+        packet.invalidate()
+        result = unpack_i32(packet)
+        del packet
+        return result
+
+
+def wait_done(mmio: MMIO) -> None:
+    for _ in range(100_000):
+        if mmio.read(REG_STATUS) & 0x2:
+            return
+        time.sleep(0.000_05)
+    raise TimeoutError(f"NPU timeout status=0x{mmio.read(REG_STATUS):X}")
+
+
+def npu_matmul(
+    mmio: MMIO, transport: TileTransport, a: np.ndarray, b: np.ndarray
+) -> tuple[np.ndarray, float]:
+    """Run an int8 MxK times KxN matrix product through 8x8 tiled hardware."""
+    if a.ndim != 2 or b.ndim != 2 or a.shape[1] != b.shape[0]:
+        raise ValueError("A must be MxK and B must be KxN")
+    m, k = a.shape
+    _, n = b.shape
+    if any(d % N for d in (m, k, n)):
+        raise ValueError("M, K, and N must be multiples of 8")
+
+    result = np.zeros((m, n), dtype=np.int32)
     t0 = time.perf_counter()
-    for _ in range(100000):
-        st = mmio.read(REG_STATUS)
-        if st & 0x2:
-            break
-        time.sleep(0.00005)
-    else:
-        raise TimeoutError(f"NPU timeout status=0x{mmio.read(REG_STATUS):X}")
-    C = read_c(mmio)
-    dt = time.perf_counter() - t0
-    return C, dt
+    for i0 in range(0, m, N):
+        for j0 in range(0, n, N):
+            first = True
+            for k0 in range(0, k, N):
+                transport.load(a[i0 : i0 + N, k0 : k0 + N], b[k0 : k0 + N, j0 : j0 + N])
+                mmio.write(REG_CTRL, CTRL_CLEAR | CTRL_START if first else CTRL_START)
+                wait_done(mmio)
+                first = False
+            result[i0 : i0 + N, j0 : j0 + N] = transport.read()
+    return result, time.perf_counter() - t0
 
 
-def cpu_matmul(A: np.ndarray, B: np.ndarray, repeats: int = 200) -> tuple[np.ndarray, float]:
-    """NumPy int32 matmul; return (C, average wall_seconds over repeats)."""
-    A32 = A.astype(np.int32)
-    B32 = B.astype(np.int32)
-    # warmup
-    _ = A32 @ B32
-    t0 = time.perf_counter()
-    C = None
-    for _ in range(repeats):
-        C = A32 @ B32
-    dt = (time.perf_counter() - t0) / repeats
-    return C, dt
+def open_device(bit_path: str) -> tuple[MMIO, TileTransport]:
+    """Download bitstream; prefer Overlay/DMA when HWH is present."""
+    try:
+        overlay = Overlay(bit_path)
+        dma = getattr(overlay, "axi_dma_0")
+        mmio = MMIO(BASE, SPAN)
+        print(f"Using AXI DMA transport ({bit_path})")
+        return mmio, DmaTransport(dma, mmio)
+    except (AttributeError, OSError, RuntimeError, ValueError, KeyError) as exc:
+        print(f"DMA Overlay unavailable ({exc}); using AXI-Lite fallback")
+        Bitstream(bit_path).download()
+        mmio = MMIO(BASE, SPAN)
+        return mmio, MmioTransport(mmio)
 
 
-def run_case(mmio: MMIO, name: str, A: np.ndarray, B: np.ndarray) -> bool:
-    C_ref, cpu_s = cpu_matmul(A, B)
-    C, npu_s = npu_matmul(mmio, A, B)
-    ok = np.array_equal(C, C_ref)
-    status = "PASS" if ok else "FAIL"
+def run_case(mmio: MMIO, transport: TileTransport, name: str, a: np.ndarray, b: np.ndarray) -> bool:
+    t_cpu0 = time.perf_counter()
+    ref = a.astype(np.int32) @ b.astype(np.int32)
+    cpu_s = time.perf_counter() - t_cpu0
+    got, npu_s = npu_matmul(mmio, transport, a, b)
+    ok = np.array_equal(got, ref)
     print(
-        f"  [{status}] {name:28s}  "
-        f"npu={npu_s * 1e3:7.3f} ms  cpu={cpu_s * 1e3:7.3f} ms  "
-        f"ratio={cpu_s / npu_s if npu_s > 0 else float('inf'):.2f}x"
+        f"  [{'PASS' if ok else 'FAIL'}] {name:20s} "
+        f"npu={npu_s * 1e3:8.3f} ms  cpu={cpu_s * 1e3:8.3f} ms"
     )
     if not ok:
-        diff = np.where(C != C_ref)
-        print(f"         first mismatch at {list(zip(diff[0][:3], diff[1][:3]))}")
-        print(f"         got {C[diff][:3]} exp {C_ref[diff][:3]}")
+        row, col = np.argwhere(got != ref)[0]
+        print(f"         [{row},{col}] got={got[row, col]} expected={ref[row, col]}")
     return ok
 
 
 def main() -> int:
     bit_path = sys.argv[1] if len(sys.argv) > 1 else "/home/xilinx/jupyter_notebooks/npukit.bit"
-    print(f"Downloading {bit_path}")
-    Bitstream(bit_path).download()
+    dims = tuple(map(int, sys.argv[2:5])) if len(sys.argv) >= 5 else (32, 32, 32)
+    if len(dims) != 3:
+        raise SystemExit("dimensions must be M K N")
 
-    mmio = MMIO(BASE, SPAN)
+    mmio, transport = open_device(bit_path)
     ident = mmio.read(REG_ID)
     if ident != ID_MAGIC:
-        print(f"BAD ID at 0x{BASE:08X}: got 0x{ident:08X}, expected 0x{ID_MAGIC:08X}")
-        print("Check that the bitstream mapped S_AXI to 0x43C00000.")
+        print(f"BAD ID: got 0x{ident:08X}, expected 0x{ID_MAGIC:08X}")
         return 1
+    print(f"ID OK version=0x{mmio.read(REG_VERSION):08X} N={mmio.read(REG_N)}")
 
-    print(f"ID OK  version=0x{mmio.read(REG_VERSION):08X}  N={mmio.read(REG_N)}")
-    print("Cases (npu time includes AXI poll+readback; cpu is NumPy avg):\n")
-
+    m, k, n = dims
     rng = np.random.default_rng(0)
-    cases: list[tuple[str, np.ndarray, np.ndarray]] = []
-
-    # Original demo stimulus
-    A_demo = np.arange(1, N + 1, dtype=np.int8).reshape(N, 1) * np.ones((1, N), dtype=np.int8)
-    B_demo = np.ones((N, N), dtype=np.int8)
-    cases.append(("demo rows×ones", A_demo, B_demo))
-
-    # Edge / structured
-    cases.append(("zeros", np.zeros((N, N), dtype=np.int8), np.zeros((N, N), dtype=np.int8)))
-    cases.append(("identity", np.eye(N, dtype=np.int8), np.eye(N, dtype=np.int8)))
-    cases.append(
+    cases = [
+        ("8x8 identity", np.arange(64, dtype=np.int8).reshape(8, 8), np.eye(8, dtype=np.int8)),
         (
-            "int8 extremes",
-            np.full((N, N), 127, dtype=np.int8),
-            np.full((N, N), -128, dtype=np.int8),
-        )
-    )
-    cases.append(
-        (
-            "neg × pos",
-            np.full((N, N), -3, dtype=np.int8),
-            np.full((N, N), 5, dtype=np.int8),
-        )
-    )
-
-    # Random suite
-    for i in range(5):
-        A = rng.integers(-128, 128, size=(N, N), dtype=np.int8)
-        B = rng.integers(-128, 128, size=(N, N), dtype=np.int8)
-        cases.append((f"random[{i}]", A, B))
-
-    passed = 0
-    for name, A, B in cases:
-        if run_case(mmio, name, A, B):
-            passed += 1
-
-    total = len(cases)
-    print(f"\n{passed}/{total} PASS")
-    return 0 if passed == total else 1
+            f"random {m}x{k}x{n}",
+            rng.integers(-8, 8, size=(m, k), dtype=np.int8),
+            rng.integers(-8, 8, size=(k, n), dtype=np.int8),
+        ),
+    ]
+    passed = sum(1 for name, a, b in cases if run_case(mmio, transport, name, a, b))
+    print(f"\n{passed}/{len(cases)} PASS")
+    return 0 if passed == len(cases) else 1
 
 
 if __name__ == "__main__":

@@ -29,6 +29,15 @@ module npukit_axil_tb;
     logic        s_axi_rvalid;
     logic        s_axi_rready;
 
+    logic [31:0] s_axis_tdata;
+    logic        s_axis_tvalid;
+    logic        s_axis_tready;
+    logic        s_axis_tlast;
+    logic [31:0] m_axis_tdata;
+    logic        m_axis_tvalid;
+    logic        m_axis_tready;
+    logic        m_axis_tlast;
+
     logic        busy;
     logic        done;
 
@@ -63,6 +72,14 @@ module npukit_axil_tb;
         .s_axi_rresp  (s_axi_rresp),
         .s_axi_rvalid (s_axi_rvalid),
         .s_axi_rready (s_axi_rready),
+        .s_axis_tdata (s_axis_tdata),
+        .s_axis_tvalid(s_axis_tvalid),
+        .s_axis_tready(s_axis_tready),
+        .s_axis_tlast (s_axis_tlast),
+        .m_axis_tdata (m_axis_tdata),
+        .m_axis_tvalid(m_axis_tvalid),
+        .m_axis_tready(m_axis_tready),
+        .m_axis_tlast (m_axis_tlast),
         .busy         (busy),
         .done         (done)
     );
@@ -117,6 +134,10 @@ module npukit_axil_tb;
         s_axi_araddr  = '0;
         s_axi_arvalid = 1'b0;
         s_axi_rready  = 1'b0;
+        s_axis_tdata  = '0;
+        s_axis_tvalid = 1'b0;
+        s_axis_tlast  = 1'b0;
+        m_axis_tready = 1'b0;
 
         // Same stimulus as systolic_array_tb
         for (i = 0; i < N; i++) begin
@@ -170,6 +191,23 @@ module npukit_axil_tb;
             C_got[i] = status;
             if (C_got[i] !== C_ref[i]) begin
                 $display("FAIL C[%0d]: got %0d exp %0d", i, C_got[i], C_ref[i]);
+                errors++;
+            end
+        end
+
+        // A second START must retain C: this is the K-tile accumulation path.
+        axi_write(32'h00C, 32'h1);
+        status = 0;
+        i = 0;
+        while ((i < 200) && !status[1]) begin
+            axi_read(32'h008, status);
+            i++;
+        end
+        for (i = 0; i < NN; i++) begin
+            axi_read(32'h400 + (i * 4), status);
+            if ($signed(status) !== (C_ref[i] * 2)) begin
+                $display("FAIL accumulated C[%0d]: got %0d exp %0d",
+                         i, $signed(status), C_ref[i] * 2);
                 errors++;
             end
         end

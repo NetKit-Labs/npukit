@@ -1,6 +1,6 @@
 # NpuKit
 
-FPGA NPU kit for the [PYNQ-Z2](https://www.tulembedded.com/FPGA/ProductsPYNQ-Z2.html) (Xilinx Zynq-7020): an **8×8 int8 output-stationary systolic array** with **AXI4-Lite** host access from the Zynq PS.
+FPGA NPU kit for the [PYNQ-Z2](https://www.tulembedded.com/FPGA/ProductsPYNQ-Z2.html) (Xilinx Zynq-7020): an **8×8 int8 output-stationary systolic array** with AXI4-Lite control and AXI DMA data movement from the Zynq PS.
 
 Part of [NetKit Labs](https://github.com/NetKit-Labs) — companion direction to [netkit](https://github.com/NetKit-Labs/netkit) (embedded NN inference on MCU/MPU), focused here on **custom FPGA acceleration**.
 
@@ -11,23 +11,25 @@ Part of [NetKit Labs](https://github.com/NetKit-Labs) — companion direction to
 | yes | `pe` — int8 × int8 → int32 MAC, with clear / enable and A/B forward |
 | yes | `systolic_array` — 8×8 PE grid (A west→east, B north→south, C stationary) |
 | yes | Icarus testbenches: `pe_tb`, `systolic_array_tb`, `npukit_axil_tb` |
-| yes | AXI4-Lite slave: CTRL/STATUS + A/B write + C readback |
-| yes | PYNQ-Z2 BD: PS `M_AXI_GP0` → `npukit_pl` `S_AXI` (FCLK0 @ 100 MHz) |
+| yes | BRAM-backed A/B/C tile storage, DSP-preferred PE MACs |
+| yes | AXI4-Lite control + AXI-Stream tile ports; Vivado BD adds AXI DMA via PS HP0 |
 | yes | Board face: LD0 heartbeat, LD1 busy, LD2 done; BTN0 = reset hold |
 | yes | Python host: `host/npukit_matmul.py` + `.ipynb` (demo/edge/random cases + NumPy timing) |
 | yes | Board bring-up verified on PYNQ-Z2 (AXI ID + matmul PASS) |
-| later | DMA / larger N |
+| yes | Host 32×32 tiling with K accumulation; DMA when `npukit.hwh` is present, MMIO fallback |
 | later | Quantization / real model bring-up |
 
 ## Hierarchy
 
 ```
-npukit_pl.v                 BD wrapper (AXI4-Lite + btn/led)
+npukit_pl.v                 BD wrapper (AXI4-Lite + AXIS + btn/led)
 └── npukit_top.sv           heartbeat + reset combine
-    └── npukit_axil.sv      regs, A/B/C mem, sequencer
+    └── npukit_axil.sv      regs, BRAM A/B/C, AXIS, sequencer
         └── systolic_array.sv
-            └── pe.sv × 64
+            └── pe.sv × 64     (DSP48E1 MAC)
 ```
+
+Placed utilization (Zynq-7020, DMA bitstream): **~13% LUT, ~9% FF, 64 DSP (29%), 2 BRAM**.
 
 ## AXI-Lite register map
 
@@ -36,15 +38,15 @@ Base address (BD default target): **`0x43C0_0000`**
 | Offset | Name | Access | Description |
 |--------|------|--------|-------------|
 | `0x000` | ID | R | `0x4E50554B` (`NPUK`) |
-| `0x004` | VERSION | R | `0x00000100` |
-| `0x008` | STATUS | R | `[0]` busy, `[1]` done |
-| `0x00C` | CTRL | W | `[0]` start, `[1]` clear (write-1-to-pulse) |
+| `0x004` | VERSION | R | `0x00000200` |
+| `0x008` | STATUS | R | `[0]` busy, `[1]` done, `[2]` AXIS RX done, `[3]` AXIS TX done |
+| `0x00C` | CTRL | W | `[0]` start, `[1]` clear, `[2]` arm C AXIS TX (all write-1 pulses) |
 | `0x010` | N | R | `8` |
 | `0x100`–`0x13F` | A | R/W | 64× int8 packed as 16× `uint32` (LE), row-major |
 | `0x200`–`0x23F` | B | R/W | same packing |
 | `0x400`–`0x4FF` | C | R | 64× int32, row-major |
 
-Host flow: write A/B → `CTRL=2` (clear) → `CTRL=1` (start) → poll `STATUS.done` → read C.
+AXIS packets are 16 packed `uint32` A words then 16 B words, with `TLAST` on word 32; C returns 64 `int32` words after `CTRL.tx_arm`. For a K-tiled result, issue `CTRL=3` for the first tile and `CTRL=1` thereafter; `start` alone preserves the PE accumulators.
 
 ## Simulate (host)
 
@@ -68,7 +70,7 @@ Expect `ALL PASS` from each TB.
 ```bash
 # From fpga/ monorepo (sources Vivado if needed):
 ../scripts/build_bitstream.sh npukit
-# → output/npukit.bit
+# → output/npukit.bit and output/npukit.hwh
 ```
 
 Or manually:
@@ -81,7 +83,7 @@ vivado -mode batch -source scripts/build_bitstream.tcl
 Copy to the PYNQ and run the host check:
 
 ```bash
-scp output/npukit.bit host/npukit_matmul.py host/npukit_matmul.ipynb \
+scp output/npukit.bit output/npukit.hwh host/npukit_matmul.py host/npukit_matmul.ipynb \
   xilinx@<pynq>:jupyter_notebooks/
 ```
 
@@ -91,12 +93,12 @@ scp output/npukit.bit host/npukit_matmul.py host/npukit_matmul.ipynb \
 source /etc/profile.d/xrt_setup.sh
 source /usr/local/share/pynq-venv/bin/activate
 python /home/xilinx/jupyter_notebooks/npukit_matmul.py \
-  /home/xilinx/jupyter_notebooks/npukit.bit
+  /home/xilinx/jupyter_notebooks/npukit.bit 32 32 32
 ```
 
 **Jupyter:** open `npukit_matmul.ipynb` and run all cells.
 
-The host calls `Bitstream.download()` (programs the PL) then `MMIO(0x43C00000)` for A/B/C. No Overlay required if the address map matches. The PL config is lost on power cycle; re-run the host to reload the `.bit`.
+With the matching `.hwh`, the host uses `Overlay` and `axi_dma_0` @ **`0x4040_0000`**; without it, it falls back to AXI-Lite MMIO. Keep `.bit` and `.hwh` side by side. The PL config is lost on power cycle; re-run the host to reload the `.bit`.
 
 ## Visualize
 
@@ -121,8 +123,9 @@ npukit/
 ## Design notes
 
 - **Output-stationary:** each PE keeps its accumulator; A/B stream past.
-- PL fabric clock is **PS FCLK0 (100 MHz)**; AXI-Lite on **M_AXI_GP0**.
-- Shared BD helper: `../scripts/pynq_bitstream.tcl` (`use_axi_lite=1` for this project; blinker stays pin-only).
+- PL fabric clock is **PS FCLK0 (100 MHz)**; AXI-Lite on **M_AXI_GP0**; DMA data on **S_AXI_HP0**.
+- Host tiles MxKxN as 8×8 blocks and accumulates over K in the PE registers.
+- Shared-style BD helper lives in-repo at `scripts/pynq_bitstream.tcl` (`use_axi_lite=1`, `use_axi_dma=1`).
 
 ## License
 
