@@ -14,7 +14,7 @@ Part of [NetKit Labs](https://github.com/NetKit-Labs) — companion direction to
 | yes | AXI4-Lite slave: CTRL/STATUS + A/B write + C readback |
 | yes | PYNQ-Z2 BD: PS `M_AXI_GP0` → `npukit_pl` `S_AXI` (FCLK0 @ 100 MHz) |
 | yes | Board face: LD0 heartbeat, LD1 busy, LD2 done; BTN0 = reset hold |
-| yes | Python host: `host/npukit_matmul.py` + `host/npukit_matmul.ipynb` (NumPy check) |
+| yes | Python host: `host/npukit_matmul.py` + `.ipynb` (demo/edge/random cases + NumPy timing) |
 | yes | Board bring-up verified on PYNQ-Z2 (AXI ID + matmul PASS) |
 | later | DMA / larger N |
 | later | Quantization / real model bring-up |

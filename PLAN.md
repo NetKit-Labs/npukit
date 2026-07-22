@@ -48,3 +48,7 @@ flowchart LR
 ## Status
 
 Milestones 1–2 are **done** (sim + AXI-Lite + BD + PYNQ host, board PASS). Rebuild with `../scripts/build_bitstream.sh npukit` after RTL/BD changes.
+
+### Z7020 size note (8×8 measured; 16×16 not built)
+
+Placed util for current design (~14.7% LUT, ~6.4% FF, **0 DSP**, **0 BRAM**): multipliers are in LUTs. Scaling PEs \(8→16\) is \(4×\) array area → roughly **~55–65% LUT** if still LUT-MAC, before DMA. DSPs are free today — mapping int8 MACs to DSP48 would shrink LUT use a lot. Soft DMA (AXI DMA + interconnect/HP) is typically a few kLUT + some BRAM; tight but plausible on Z7020 if DSP-mapped or carefully floorplanned. Treat 16×16+DMA as **fit-with-care**, not free headroom.
