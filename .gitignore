@@ -1,0 +1,22 @@
+# Vivado generated
+vivado/
+.Xil/
+*.jou
+*.log
+*.str
+NA/
+
+# Simulation artifacts
+sim/*.vvp
+sim/*.vcd
+sim/debug*
+
+# Bitstreams / build outputs
+output/*.bit
+output/*.bin
+output/*.ltx
+
+# Editor / OS
+.DS_Store
+*~
+*.swp
