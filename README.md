@@ -29,7 +29,7 @@ npukit_pl.v                 BD wrapper (AXI4-Lite + AXIS + btn/led)
             └── pe.sv × 64     (DSP48E1 MAC)
 ```
 
-Placed utilization (Zynq-7020, DMA bitstream): **~13% LUT, ~9% FF, 64 DSP (29%), 2 BRAM**.
+Placed utilization (Zynq-7020, DMA bitstream): **~13% LUT, ~9% FF, 64 DSP (29%), 2 BRAM tiles**.
 
 ## AXI-Lite register map
 
@@ -116,7 +116,7 @@ npukit/
   host/          npukit_matmul.py, npukit_matmul.ipynb
   viz/           animation scripts
   constraints/   pynq_z2.xdc (btn/led; clock from PS FCLK0)
-  scripts/       create_project.tcl, build_bitstream.tcl
+  scripts/       create_project.tcl, build_bitstream.tcl, pynq_bitstream.tcl
   output/        bitstream artifacts (gitignored)
 ```
 
@@ -125,7 +125,8 @@ npukit/
 - **Output-stationary:** each PE keeps its accumulator; A/B stream past.
 - PL fabric clock is **PS FCLK0 (100 MHz)**; AXI-Lite on **M_AXI_GP0**; DMA data on **S_AXI_HP0**.
 - Host tiles MxKxN as 8×8 blocks and accumulates over K in the PE registers.
-- Shared-style BD helper lives in-repo at `scripts/pynq_bitstream.tcl` (`use_axi_lite=1`, `use_axi_dma=1`).
+- **A/B/C memories:** three logical tile buffers (`a_mem` / `b_mem` / `c_mem`) — one 8×8 A tile, one 8×8 B tile, one 8×8 C result. Vivado packs those small arrays into **2 physical BRAM tiles**; that count is not ping-pong buffering and not “two matrix slots.” There is no double-buffer: DMA fills the single A/B, the array runs, then C is read before the next tile.
+- BD helper: `scripts/pynq_bitstream.tcl` (`use_axi_lite=1`, `use_axi_dma=1`).
 
 ## License
 
