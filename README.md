@@ -14,9 +14,9 @@ Part of [NetKit Labs](https://github.com/NetKit-Labs) — companion direction to
 | yes | BRAM-backed A/B/C tile storage, DSP-preferred PE MACs |
 | yes | AXI4-Lite control + AXI-Stream tile ports; Vivado BD adds AXI DMA via PS HP0 |
 | yes | Board face: LD0 heartbeat, LD1 busy, LD2 done; BTN0 = reset hold |
-| yes | Python host: `host/npukit_matmul.py` + `.ipynb` (demo/edge/random cases + NumPy timing) |
-| yes | Board bring-up verified on PYNQ-Z2 (AXI ID + matmul PASS) |
-| yes | Host 32×32 tiling with K accumulation; DMA when `npukit.hwh` is present, MMIO fallback |
+| yes | Python host on PYNQ: `npukit_matmul.py` + notebook wrapper (classic 8×8 + tiled suites) |
+| yes | Board bring-up verified on PYNQ-Z2 (DMA + AXI-Lite control, 11/11 PASS) |
+| yes | Keep both paths: DMA for matrix tiles, MMIO/AXI-Lite for control (+ fallback) |
 | later | Quantization / real model bring-up |
 
 ## Hierarchy
@@ -96,9 +96,16 @@ python /home/xilinx/jupyter_notebooks/npukit_matmul.py \
   /home/xilinx/jupyter_notebooks/npukit.bit 32 32 32
 ```
 
-**Jupyter:** open `npukit_matmul.ipynb` and run all cells.
+**Jupyter:** open `npukit_matmul.ipynb` and run all cells. The notebook is an interactive wrapper around `npukit_matmul.py` (classic 8×8 suite + tiled MxKxN). Matrix data is always built in Python (e.g. `classic_8x8_cases()` / `tiled_cases()`), never loaded from the `.bit`.
 
-With the matching `.hwh`, the host uses `Overlay` and `axi_dma_0` @ **`0x4040_0000`**; without it, it falls back to AXI-Lite MMIO. Keep `.bit` and `.hwh` side by side. The PL config is lost on power cycle; re-run the host to reload the `.bit`.
+**PS ↔ PL paths (keep both):**
+
+| Path | Protocol / IP | Use |
+|------|----------------|-----|
+| MMIO | AXI4-Lite @ `0x43C0_0000` | CTRL / STATUS / ID; also A/B/C fallback if DMA unavailable |
+| DMA | `axi_dma_0` @ `0x4040_0000` → AXIS | Bulk A/B tile in, C tile out |
+
+With the matching `.hwh`, the host prefers Overlay + DMA for matrices and still uses AXI-Lite for control. Without `.hwh`, it falls back to AXI-Lite MMIO for everything. Keep `.bit` and `.hwh` side by side. The PL config is lost on power cycle; re-run the host to reload the `.bit`.
 
 ## Visualize
 
@@ -124,8 +131,9 @@ npukit/
 
 - **Output-stationary:** each PE keeps its accumulator; A/B stream past.
 - PL fabric clock is **PS FCLK0 (100 MHz)**; AXI-Lite on **M_AXI_GP0**; DMA data on **S_AXI_HP0**.
-- Host tiles MxKxN as 8×8 blocks and accumulates over K in the PE registers.
-- **A/B/C memories:** three logical tile buffers (`a_mem` / `b_mem` / `c_mem`) — one 8×8 A tile, one 8×8 B tile, one 8×8 C result. Vivado packs those small arrays into **2 physical BRAM tiles**; that count is not ping-pong buffering and not “two matrix slots.” There is no double-buffer: DMA fills the single A/B, the array runs, then C is read before the next tile.
+- Host software runs on the **Zynq A9 / PYNQ Linux** (not on a laptop). It tiles MxKxN as 8×8 blocks and accumulates over K in the PE registers.
+- **MMIO ≠ AXI-Lite:** AXI-Lite is the bus protocol; MMIO is the CPU mapping of those registers. We keep MMIO (control + fallback) and DMA (matrix payloads) together.
+- **A/B/C memories:** three logical tile buffers (`a_mem` / `b_mem` / `c_mem`) — one 8×8 A tile, one 8×8 B tile, one 8×8 C result. Vivado may report **2 BRAM tiles** for packing; that is a utilization detail, not ping-pong or two matrix slots.
 - BD helper: `scripts/pynq_bitstream.tcl` (`use_axi_lite=1`, `use_axi_dma=1`).
 
 ## License

@@ -168,6 +168,62 @@ def run_case(mmio: MMIO, transport: TileTransport, name: str, a: np.ndarray, b: 
     return ok
 
 
+def classic_8x8_cases(rng: np.random.Generator | None = None) -> list[tuple[str, np.ndarray, np.ndarray]]:
+    """Original single-tile demo / edge / random suite (all 8×8)."""
+    if rng is None:
+        rng = np.random.default_rng(0)
+    cases: list[tuple[str, np.ndarray, np.ndarray]] = []
+
+    a_demo = np.arange(1, N + 1, dtype=np.int8).reshape(N, 1) * np.ones((1, N), dtype=np.int8)
+    b_demo = np.ones((N, N), dtype=np.int8)
+    cases.append(("demo rows×ones", a_demo, b_demo))
+    cases.append(("zeros", np.zeros((N, N), dtype=np.int8), np.zeros((N, N), dtype=np.int8)))
+    cases.append(("identity", np.eye(N, dtype=np.int8), np.eye(N, dtype=np.int8)))
+    cases.append(
+        (
+            "int8 extremes",
+            np.full((N, N), 127, dtype=np.int8),
+            np.full((N, N), -128, dtype=np.int8),
+        )
+    )
+    cases.append(
+        (
+            "neg × pos",
+            np.full((N, N), -3, dtype=np.int8),
+            np.full((N, N), 5, dtype=np.int8),
+        )
+    )
+    for i in range(5):
+        a = rng.integers(-128, 128, size=(N, N), dtype=np.int8)
+        b = rng.integers(-128, 128, size=(N, N), dtype=np.int8)
+        cases.append((f"random[{i}]", a, b))
+    return cases
+
+
+def tiled_cases(
+    m: int, k: int, n: int, rng: np.random.Generator | None = None
+) -> list[tuple[str, np.ndarray, np.ndarray]]:
+    """Larger products that exercise host tiling + K accumulation."""
+    if rng is None:
+        rng = np.random.default_rng(1)
+    if any(d % N for d in (m, k, n)):
+        raise ValueError("M, K, and N must be multiples of 8")
+    return [
+        (
+            f"tiled random {m}x{k}x{n}",
+            rng.integers(-8, 8, size=(m, k), dtype=np.int8),
+            rng.integers(-8, 8, size=(k, n), dtype=np.int8),
+        )
+    ]
+
+
+def run_suite(
+    mmio: MMIO, transport: TileTransport, cases: list[tuple[str, np.ndarray, np.ndarray]]
+) -> tuple[int, int]:
+    passed = sum(1 for name, a, b in cases if run_case(mmio, transport, name, a, b))
+    return passed, len(cases)
+
+
 def main() -> int:
     bit_path = sys.argv[1] if len(sys.argv) > 1 else "/home/xilinx/jupyter_notebooks/npukit.bit"
     dims = tuple(map(int, sys.argv[2:5])) if len(sys.argv) >= 5 else (32, 32, 32)
@@ -180,20 +236,17 @@ def main() -> int:
         print(f"BAD ID: got 0x{ident:08X}, expected 0x{ID_MAGIC:08X}")
         return 1
     print(f"ID OK version=0x{mmio.read(REG_VERSION):08X} N={mmio.read(REG_N)}")
+    print("NPU time includes DMA/MMIO + poll; CPU is NumPy matmul.\n")
 
     m, k, n = dims
     rng = np.random.default_rng(0)
-    cases = [
-        ("8x8 identity", np.arange(64, dtype=np.int8).reshape(8, 8), np.eye(8, dtype=np.int8)),
-        (
-            f"random {m}x{k}x{n}",
-            rng.integers(-8, 8, size=(m, k), dtype=np.int8),
-            rng.integers(-8, 8, size=(k, n), dtype=np.int8),
-        ),
-    ]
-    passed = sum(1 for name, a, b in cases if run_case(mmio, transport, name, a, b))
-    print(f"\n{passed}/{len(cases)} PASS")
-    return 0 if passed == len(cases) else 1
+    print("--- classic 8×8 ---")
+    p0, t0 = run_suite(mmio, transport, classic_8x8_cases(rng))
+    print(f"\n--- tiled {m}x{k}x{n} ---")
+    p1, t1 = run_suite(mmio, transport, tiled_cases(m, k, n, rng))
+    passed, total = p0 + p1, t0 + t1
+    print(f"\n{passed}/{total} PASS")
+    return 0 if passed == total else 1
 
 
 if __name__ == "__main__":

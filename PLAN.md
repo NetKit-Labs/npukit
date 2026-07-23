@@ -41,7 +41,8 @@ flowchart LR
 ## Keep from blinker lessons
 
 - SystemVerilog for design; `.v` wrapper only for BD
-- Load with Overlay (DMA) or `Bitstream` + `MMIO` (base `0x43C00000`)
+- Load with Overlay (DMA for A/B/C tiles) plus AXI-Lite MMIO for CTRL/STATUS (base `0x43C00000`); keep both paths
+- Host: `npukit_matmul.py` is the source of truth; `.ipynb` is the interactive wrapper (classic 8×8 + tiled suites)
 - Keep PS + board preset in the Vivado BD
 - Module TBs before board bring-up
 
