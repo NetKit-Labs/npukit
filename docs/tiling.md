@@ -131,3 +131,5 @@ Here \(K=8\), so one hardware run fills the whole \(C\) (no \(K\) accumulation).
 - Math / loops: `npu_matmul()` in `host/npukit_matmul.py`
 - Printed plans + matrices: `describe_tiling()`, `run_case(..., verbose=True)`
 - Narrative in Jupyter: cells that call the same helpers so saved outputs keep A/B/C visible
+
+The checked-in `host/npukit_matmul.ipynb` includes a PYNQ-Z2 DMA run with those dumps for the classic 8×8 suite plus tiled **16×16** and **32×32×32** (**12/12 PASS**).

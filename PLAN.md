@@ -62,7 +62,7 @@ An int8 8×8 GEMM covers MLP/FC and 1×1 conv; standard conv can be lowered to G
 
 ## Status
 
-MVP through DMA + host tiling is **done** (sim PASS, board PASS with Overlay/`axi_dma_0`). Rebuild with `../scripts/build_bitstream.sh npukit` (or in-repo `scripts/`) after RTL/BD changes.
+MVP through DMA + host tiling is **done** (sim PASS; board **12/12 PASS** with Overlay/`axi_dma_0`, including tiled 16×16 and 32×32×32). Saved verbose dumps live in `host/npukit_matmul.ipynb`. Rebuild with `../scripts/build_bitstream.sh npukit` (or in-repo `scripts/`) after RTL/BD changes.
 
 ### Z7020 size note (8×8 + DMA measured; 16×16 not built)
 

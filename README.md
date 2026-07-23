@@ -15,8 +15,9 @@ Part of [NetKit Labs](https://github.com/NetKit-Labs) — companion direction to
 | yes | AXI4-Lite control + AXI-Stream tile ports; Vivado BD adds AXI DMA via PS HP0 |
 | yes | Board face: LD0 heartbeat, LD1 busy, LD2 done; BTN0 = reset hold |
 | yes | Python host on PYNQ: `npukit_matmul.py` + notebook wrapper (classic 8×8 + tiled suites) |
-| yes | Board bring-up verified on PYNQ-Z2 (DMA + AXI-Lite control, 11/11 PASS) |
+| yes | Board bring-up verified on PYNQ-Z2 (DMA + AXI-Lite control, **12/12 PASS**) |
 | yes | Keep both paths: DMA for matrix tiles, MMIO/AXI-Lite for control (+ fallback) |
+| yes | Saved notebook run: classic 8×8 + tiled 16×16 / 32×32 dumps in `npukit_matmul.ipynb` |
 | yes | **Hardware MVP complete** — next work is mostly runtime / models |
 | later | Quantization, tiny end-to-end NN on host+GEMM; optional HW polish |
 
@@ -98,7 +99,7 @@ python /home/xilinx/jupyter_notebooks/npukit_matmul.py \
   /home/xilinx/jupyter_notebooks/npukit.bit 32 32 32
 ```
 
-**Jupyter:** open `npukit_matmul.ipynb` and run all cells. The notebook is an interactive wrapper around `npukit_matmul.py` (classic 8×8 suite + tiled MxKxN). Matrix data is always built in Python (e.g. `classic_8x8_cases()` / `tiled_cases()`), never loaded from the `.bit`.
+**Jupyter:** open `npukit_matmul.ipynb` and run all cells. The notebook is an interactive wrapper around `npukit_matmul.py` (classic 8×8 suite + tiled MxKxN). Matrix data is always built in Python (e.g. `classic_8x8_cases()` / `tiled_cases()`), never loaded from the `.bit`. A checked-in board run on PYNQ-Z2 (DMA transport) shows **12/12 PASS**, including tiled **16×16** and **32×32×32**, with verbose A/B/C dumps left in the cell outputs.
 
 **PS ↔ PL paths (keep both):**
 
