@@ -109,6 +109,12 @@ python /home/xilinx/jupyter_notebooks/npukit_matmul.py \
 
 With the matching `.hwh`, the host prefers Overlay + DMA for matrices and still uses AXI-Lite for control. Without `.hwh`, it falls back to AXI-Lite MMIO for everything. Keep `.bit` and `.hwh` side by side. The PL config is lost on power cycle; re-run the host to reload the `.bit`.
 
+## Tiling math
+
+How host tiling and the inner dimension \(K\) work (with a 16×16 worked example): **[`docs/tiling.md`](docs/tiling.md)**.
+
+The PYNQ host/`ipynb` print **A**, **B**, **C_npu**, **C_ref**, and a tiling plan for every case (pass `--quiet` on the CLI to suppress). After running the notebook, save it so those dumps stay in the file.
+
 ## Visualize
 
 ```bash
@@ -123,6 +129,7 @@ npukit/
   rtl/           pe, systolic_array, npukit_axil, npukit_top, npukit_pl
   sim/           pe_tb, systolic_array_tb, npukit_axil_tb
   host/          npukit_matmul.py, npukit_matmul.ipynb
+  docs/          tiling.md (math + worked example)
   viz/           animation scripts
   constraints/   pynq_z2.xdc (btn/led; clock from PS FCLK0)
   scripts/       create_project.tcl, build_bitstream.tcl, pynq_bitstream.tcl

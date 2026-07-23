@@ -5,13 +5,15 @@ The accelerator is an 8x8 tile.  Larger MxK times KxN products are reduced
 over K in the array accumulators: the first K tile writes CTRL=CLEAR|START,
 and later K tiles write CTRL=START only.
 
+See docs/tiling.md for the math.
+
 Usage:
   python3 npukit_matmul.py [/path/to/npukit.bit] [M K N]
+  python3 npukit_matmul.py ... --quiet   # PASS/FAIL lines only
 """
 
 from __future__ import annotations
 
-import struct
 import sys
 import time
 from typing import Protocol
@@ -40,6 +42,9 @@ CTRL_START = 0x1
 CTRL_CLEAR = 0x2
 CTRL_TX_ARM = 0x4
 ID_MAGIC = 0x4E50554B
+
+# Default: show matrices and tiling. Pass --quiet for summary lines only.
+VERBOSE = True
 
 
 def pack_i8(mat: np.ndarray) -> np.ndarray:
@@ -90,7 +95,6 @@ class DmaTransport:
         packet.flush()
         self.dma.sendchannel.transfer(packet)
         self.dma.sendchannel.wait()
-        # Keep a reference until the channel has completed its transfer.
         del packet
 
     def read(self) -> np.ndarray:
@@ -110,6 +114,55 @@ def wait_done(mmio: MMIO) -> None:
             return
         time.sleep(0.000_05)
     raise TimeoutError(f"NPU timeout status=0x{mmio.read(REG_STATUS):X}")
+
+
+def describe_tiling(m: int, k: int, n: int, tile: int = N) -> str:
+    """Human-readable tiling plan: spatial C tiles and K reductions."""
+    if any(d % tile for d in (m, k, n)):
+        raise ValueError("M, K, and N must be multiples of the tile size")
+    mt, kt, nt = m // tile, k // tile, n // tile
+    runs = mt * nt * kt
+    lines = [
+        f"  Shapes: A[{m}×{k}] @ B[{k}×{n}] → C[{m}×{n}]  (hardware tile T={tile})",
+        f"  K is the inner dim: each C[i,j] = sum_{{p=0..{k-1}}} A[i,p]*B[p,j]",
+        f"  Spatial C tiles: {mt}×{nt} = {mt * nt}   |   K-steps per C tile: {kt}",
+        f"  Hardware runs: {mt}×{nt}×{kt} = {runs}",
+        "  Example for C[0:T, 0:T]:",
+    ]
+    for step, k0 in enumerate(range(0, k, tile)):
+        ctrl = "CLEAR|START" if step == 0 else "START     "
+        lines.append(
+            f"    k0={k0:3d}  CTRL={ctrl}  "
+            f"A[0:{tile}, {k0}:{k0 + tile}] @ B[{k0}:{k0 + tile}, 0:{tile}]"
+        )
+    if mt > 1 or nt > 1:
+        lines.append(
+            f"  Then repeat for every (i0,j0) in "
+            f"{{0,{tile},…,{m - tile}}} × {{0,{tile},…,{n - tile}}}."
+        )
+    return "\n".join(lines)
+
+
+def format_matrix(name: str, mat: np.ndarray, max_rows: int = 32, max_cols: int = 32) -> str:
+    """Pretty-print a matrix; truncate huge ones with a corner view."""
+    arr = np.asarray(mat)
+    rows, cols = arr.shape
+    with np.printoptions(
+        threshold=max_rows * max_cols + 1,
+        linewidth=120,
+        suppress=True,
+        formatter={"int": lambda x: f"{int(x):4d}"},
+    ):
+        if rows <= max_rows and cols <= max_cols:
+            body = str(arr)
+        else:
+            r, c = min(rows, 8), min(cols, 16)
+            body = (
+                f"(showing top-left {r}×{c} of {rows}×{cols})\n"
+                f"{arr[:r, :c]}\n"
+                f"  ... full shape {rows}×{cols}, dtype={arr.dtype}"
+            )
+    return f"{name} shape={arr.shape} dtype={arr.dtype}\n{body}"
 
 
 def npu_matmul(
@@ -152,19 +205,51 @@ def open_device(bit_path: str) -> tuple[MMIO, TileTransport]:
         return mmio, MmioTransport(mmio)
 
 
-def run_case(mmio: MMIO, transport: TileTransport, name: str, a: np.ndarray, b: np.ndarray) -> bool:
+def run_case(
+    mmio: MMIO,
+    transport: TileTransport,
+    name: str,
+    a: np.ndarray,
+    b: np.ndarray,
+    *,
+    verbose: bool | None = None,
+) -> bool:
+    if verbose is None:
+        verbose = VERBOSE
     t_cpu0 = time.perf_counter()
     ref = a.astype(np.int32) @ b.astype(np.int32)
     cpu_s = time.perf_counter() - t_cpu0
     got, npu_s = npu_matmul(mmio, transport, a, b)
     ok = np.array_equal(got, ref)
+
+    banner = f"{'=' * 72}\nCASE: {name}  [{'PASS' if ok else 'FAIL'}]\n{'=' * 72}"
+    print(banner)
     print(
-        f"  [{'PASS' if ok else 'FAIL'}] {name:20s} "
-        f"npu={npu_s * 1e3:8.3f} ms  cpu={cpu_s * 1e3:8.3f} ms"
+        f"  timing: npu={npu_s * 1e3:8.3f} ms   cpu(NumPy)={cpu_s * 1e3:8.3f} ms   "
+        f"transport={type(transport).__name__}"
     )
-    if not ok:
+    print(describe_tiling(a.shape[0], a.shape[1], b.shape[1]))
+    if verbose:
+        print()
+        print(format_matrix("A", a))
+        print()
+        print(format_matrix("B", b))
+        print()
+        print(format_matrix("C_npu (from FPGA)", got))
+        print()
+        print(format_matrix("C_ref (NumPy A@B)", ref))
+        if ok:
+            print("\n  C_npu == C_ref  ✓")
+        else:
+            diff = got.astype(np.int64) - ref.astype(np.int64)
+            row, col = np.argwhere(got != ref)[0]
+            print(f"\n  MISMATCH first at [{row},{col}]: "
+                  f"npu={got[row, col]} ref={ref[row, col]} diff={diff[row, col]}")
+            print(format_matrix("C_npu - C_ref", diff))
+    elif not ok:
         row, col = np.argwhere(got != ref)[0]
-        print(f"         [{row},{col}] got={got[row, col]} expected={ref[row, col]}")
+        print(f"  mismatch [{row},{col}] got={got[row, col]} expected={ref[row, col]}")
+    print()
     return ok
 
 
@@ -200,6 +285,14 @@ def classic_8x8_cases(rng: np.random.Generator | None = None) -> list[tuple[str,
     return cases
 
 
+def tiled_demo_16x16() -> tuple[str, np.ndarray, np.ndarray]:
+    """Readable 16×16 case so spatial tiles and K-steps are easy to eyeball."""
+    # A row r is filled with (r+1); B is identity → C == A (padded math still clear).
+    a = np.arange(1, 17, dtype=np.int8).reshape(16, 1) * np.ones((1, 16), dtype=np.int8)
+    b = np.eye(16, dtype=np.int8)
+    return "tiled demo 16×16 (A rows× I)", a, b
+
+
 def tiled_cases(
     m: int, k: int, n: int, rng: np.random.Generator | None = None
 ) -> list[tuple[str, np.ndarray, np.ndarray]]:
@@ -208,25 +301,44 @@ def tiled_cases(
         rng = np.random.default_rng(1)
     if any(d % N for d in (m, k, n)):
         raise ValueError("M, K, and N must be multiples of 8")
-    return [
+    cases: list[tuple[str, np.ndarray, np.ndarray]] = []
+    if m >= 16 and k >= 16 and n >= 16:
+        cases.append(tiled_demo_16x16())
+    cases.append(
         (
             f"tiled random {m}x{k}x{n}",
             rng.integers(-8, 8, size=(m, k), dtype=np.int8),
             rng.integers(-8, 8, size=(k, n), dtype=np.int8),
         )
-    ]
+    )
+    return cases
 
 
 def run_suite(
-    mmio: MMIO, transport: TileTransport, cases: list[tuple[str, np.ndarray, np.ndarray]]
+    mmio: MMIO,
+    transport: TileTransport,
+    cases: list[tuple[str, np.ndarray, np.ndarray]],
+    *,
+    verbose: bool | None = None,
 ) -> tuple[int, int]:
-    passed = sum(1 for name, a, b in cases if run_case(mmio, transport, name, a, b))
+    passed = sum(
+        1 for name, a, b in cases if run_case(mmio, transport, name, a, b, verbose=verbose)
+    )
     return passed, len(cases)
 
 
-def main() -> int:
-    bit_path = sys.argv[1] if len(sys.argv) > 1 else "/home/xilinx/jupyter_notebooks/npukit.bit"
-    dims = tuple(map(int, sys.argv[2:5])) if len(sys.argv) >= 5 else (32, 32, 32)
+def main(argv: list[str] | None = None) -> int:
+    global VERBOSE
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if "--quiet" in argv:
+        VERBOSE = False
+        argv.remove("--quiet")
+    if "--verbose" in argv:
+        VERBOSE = True
+        argv.remove("--verbose")
+
+    bit_path = argv[0] if len(argv) >= 1 else "/home/xilinx/jupyter_notebooks/npukit.bit"
+    dims = tuple(map(int, argv[1:4])) if len(argv) >= 4 else (32, 32, 32)
     if len(dims) != 3:
         raise SystemExit("dimensions must be M K N")
 
@@ -236,13 +348,14 @@ def main() -> int:
         print(f"BAD ID: got 0x{ident:08X}, expected 0x{ID_MAGIC:08X}")
         return 1
     print(f"ID OK version=0x{mmio.read(REG_VERSION):08X} N={mmio.read(REG_N)}")
-    print("NPU time includes DMA/MMIO + poll; CPU is NumPy matmul.\n")
+    print("NPU time includes DMA/MMIO + poll; CPU is NumPy matmul.")
+    print("Verbose matrix dump on (use --quiet to suppress).\n")
 
     m, k, n = dims
     rng = np.random.default_rng(0)
     print("--- classic 8×8 ---")
     p0, t0 = run_suite(mmio, transport, classic_8x8_cases(rng))
-    print(f"\n--- tiled {m}x{k}x{n} ---")
+    print(f"\n--- tiled (includes 16×16 demo + random {m}x{k}x{n}) ---")
     p1, t1 = run_suite(mmio, transport, tiled_cases(m, k, n, rng))
     passed, total = p0 + p1, t0 + t1
     print(f"\n{passed}/{total} PASS")
