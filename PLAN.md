@@ -4,7 +4,7 @@
 
 Start a **small NPU** on PYNQ-Z2: an **8×8 int8 systolic array**, built and verified the same way as blinker (SV modules + Icarus TBs on the host; Vivado `.bit`; load via Overlay / `Bitstream.download()`).
 
-## Assumed MVP (default)
+## Assumed MVP (default) — hardware done
 
 1. **`pe` module** — int8 × int8 → accumulate (int32), with clear / enable; DSP48-preferred MAC
 2. **`systolic_array`** — 8×8 PE grid, **output-stationary** (A west→east, B north→south)
@@ -12,7 +12,9 @@ Start a **small NPU** on PYNQ-Z2: an **8×8 int8 systolic array**, built and ver
 4. **Project skeleton** with AXI-Lite + AXI DMA (PS `M_AXI_GP0` + `S_AXI_HP0`)
 5. **Host** — tiled matmul via `host/npukit_matmul.py` / `.ipynb` (NumPy check)
 
-**Next / later:** ping-pong / larger on-chip tiles, real NN models, quantization toolchain.
+The **hardware MVP is complete**. Remaining value is mostly **runtime**: quantization, packing, layer orchestration, and a tiny end-to-end model that calls the GEMM.
+
+**Optional later (HW polish, not blockers):** ping-pong / larger on-chip tiles, fused bias+ReLU after GEMM, AXIS stimulus in `npukit_axil_tb`. No dedicated 3×3 / depthwise unit unless a DS-CNN target profiles that way.
 
 ## Project layout
 
@@ -23,7 +25,7 @@ Start a **small NPU** on PYNQ-Z2: an **8×8 int8 systolic array**, built and ver
 
 ```mermaid
 flowchart LR
-  subgraph done [Done]
+  subgraph done [Done HW MVP]
     PE[pe.sv]
     SA[systolic_array.sv]
     AXIL[npukit_axil BRAM AXIS]
@@ -31,10 +33,11 @@ flowchart LR
     HOST[host tiled matmul]
     PE --> SA --> AXIL --> DMA --> HOST
   end
-  subgraph later [Later]
-    PP[ping-pong / larger tiles]
-    Q[quant / models]
-    HOST --> PP --> Q
+  subgraph later [Later mostly SW]
+    Q[quant / tiny model runtime]
+    PP[optional ping-pong bias-ReLU]
+    HOST --> Q
+    HOST --> PP
   end
 ```
 
@@ -46,13 +49,25 @@ flowchart LR
 - Keep PS + board preset in the Vivado BD
 - Module TBs before board bring-up
 
+## Runtime vs fabric (for a real NN)
+
+| On A9 / runtime first | Optional later in PL |
+|-----------------------|----------------------|
+| Orchestration, buffers, tiling | Fused bias + ReLU after GEMM |
+| Reshape / transpose / `im2col` | Ping-pong A/B tiles |
+| Quantize / dequantize / scales | Depthwise / pooling if CNN-hot |
+| Softmax / argmax, pooling | — |
+
+An int8 8×8 GEMM covers MLP/FC and 1×1 conv; standard conv can be lowered to GEMM in software. “1×1” means no spatial neighborhood — not identity and not all-ones weights.
+
 ## Status
 
 MVP through DMA + host tiling is **done** (sim PASS, board PASS with Overlay/`axi_dma_0`). Rebuild with `../scripts/build_bitstream.sh npukit` (or in-repo `scripts/`) after RTL/BD changes.
 
 ### Z7020 size note (8×8 + DMA measured; 16×16 not built)
 
-Placed util for the current DMA bitstream: **~13% LUT, ~9% FF, 64 DSP (29%), 2 BRAM tiles**.
+Placed util for the current DMA bitstream: **~13% LUT, ~9% FF, 64 DSP (29%), 2 BRAM tiles**  
+(roughly **87% LUT / 91% FF / 71% DSP / 99% BRAM** still free).
 
 Those **2 BRAM tiles** are Vivado’s packing of the three small logical memories (`a_mem`, `b_mem`, `c_mem` — one 8×8 tile each). They are **not** ping-pong buffers and **not** two concurrent matrix slots. Larger MxKxN products are tiled in software over the single A/B/C tile buffers.
 

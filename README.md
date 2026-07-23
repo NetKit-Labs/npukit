@@ -17,7 +17,8 @@ Part of [NetKit Labs](https://github.com/NetKit-Labs) — companion direction to
 | yes | Python host on PYNQ: `npukit_matmul.py` + notebook wrapper (classic 8×8 + tiled suites) |
 | yes | Board bring-up verified on PYNQ-Z2 (DMA + AXI-Lite control, 11/11 PASS) |
 | yes | Keep both paths: DMA for matrix tiles, MMIO/AXI-Lite for control (+ fallback) |
-| later | Quantization / real model bring-up |
+| yes | **Hardware MVP complete** — next work is mostly runtime / models |
+| later | Quantization, tiny end-to-end NN on host+GEMM; optional HW polish |
 
 ## Hierarchy
 
@@ -29,7 +30,8 @@ npukit_pl.v                 BD wrapper (AXI4-Lite + AXIS + btn/led)
             └── pe.sv × 64     (DSP48E1 MAC)
 ```
 
-Placed utilization (Zynq-7020, DMA bitstream): **~13% LUT, ~9% FF, 64 DSP (29%), 2 BRAM tiles**.
+Placed utilization (Zynq-7020, DMA bitstream): **~13% LUT, ~9% FF, 64 DSP (29%), 2 BRAM tiles**  
+(~87% LUT, ~91% FF, ~71% DSP, ~99% BRAM still free; DSPs are the main limit if the array grows).
 
 ## AXI-Lite register map
 
@@ -134,6 +136,9 @@ npukit/
 - Host software runs on the **Zynq A9 / PYNQ Linux** (not on a laptop). It tiles MxKxN as 8×8 blocks and accumulates over K in the PE registers.
 - **MMIO ≠ AXI-Lite:** AXI-Lite is the bus protocol; MMIO is the CPU mapping of those registers. We keep MMIO (control + fallback) and DMA (matrix payloads) together.
 - **A/B/C memories:** three logical tile buffers (`a_mem` / `b_mem` / `c_mem`) — one 8×8 A tile, one 8×8 B tile, one 8×8 C result. Vivado may report **2 BRAM tiles** for packing; that is a utilization detail, not ping-pong or two matrix slots.
+- **NN coverage:** an int8 GEMM is enough for MLP / FC and 1×1 conv; standard conv can use `im2col`→GEMM later. No dedicated 3×3 / depthwise engine for now.
+- **Host vs PL:** bias, ReLU, pooling, reshape, quant/scales, softmax/argmax, and orchestration stay on the **runtime (A9)** first. Optional later PL: fused bias+ReLU, ping-pong buffers — only if profiling warrants it.
+- **Sim:** `npukit_axil_tb` covers AXI-Lite (+ accumulate). Do not Icarus-sim the Xilinx DMA IP; optional later: AXIS stimulus in that TB.
 - BD helper: `scripts/pynq_bitstream.tcl` (`use_axi_lite=1`, `use_axi_dma=1`).
 
 ## License
