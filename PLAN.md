@@ -12,15 +12,15 @@ Start a **small NPU** on PYNQ-Z2: an **8×8 int8 systolic array**, built and ver
 4. **Project skeleton** with AXI-Lite + AXI DMA (PS `M_AXI_GP0` + `S_AXI_HP0`)
 5. **Host** — tiled matmul via `host/npukit_matmul.py` / `.ipynb` (NumPy check)
 
-The **hardware MVP is complete**. Remaining value is mostly **runtime**: quantization, packing, layer orchestration, and a tiny end-to-end model that calls the GEMM.
+The **GEMM hardware MVP is complete**. Transformer **glue** (VERSION `0x300`: residual / GELU / RMSNorm / Softmax, `MAX_LEN=16`) meets 100 MHz and passes on PYNQ-Z2 with `host/npukit_transformer.py`. RoPE / masks / reshape stay on the A9.
 
-**Optional later (HW polish, not blockers):** ping-pong / larger on-chip tiles, fused bias+ReLU after GEMM, AXIS stimulus in `npukit_axil_tb`. No dedicated 3×3 / depthwise unit unless a DS-CNN target profiles that way.
+**Next:** quantized end-to-end tiny transformer. **Optional later:** ping-pong tiles, depthwise for DS-CNN, AXIS stimulus in `npukit_axil_tb`.
 
 ## Project layout
 
-- `rtl/pe.sv`, `rtl/systolic_array.sv`, `rtl/npukit_axil.sv`, `rtl/npukit_top.sv`, `rtl/npukit_pl.v`
-- `sim/pe_tb.sv`, `sim/systolic_array_tb.sv`, `sim/npukit_axil_tb.sv`
-- `host/npukit_matmul.py`, `host/npukit_matmul.ipynb`
+- `rtl/pe.sv`, `rtl/systolic_array.sv`, `rtl/npukit_glue.sv`, `rtl/npukit_axil.sv`, `rtl/npukit_top.sv`, `rtl/npukit_pl.v`
+- `sim/pe_tb.sv`, `sim/systolic_array_tb.sv`, `sim/npukit_axil_tb.sv`, `sim/npukit_glue_tb.sv`
+- `host/npukit_matmul.py`, `host/npukit_matmul.ipynb`, `host/npukit_transformer.py`
 - `scripts/create_project.tcl`, `scripts/build_bitstream.tcl`, `scripts/pynq_bitstream.tcl`
 
 ```mermaid

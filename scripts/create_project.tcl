@@ -14,6 +14,7 @@ set use_axi_dma  1
 set rtl_files [list \
     [file join $rtl_dir pe.sv] \
     [file join $rtl_dir systolic_array.sv] \
+    [file join $rtl_dir npukit_glue.sv] \
     [file join $rtl_dir npukit_axil.sv] \
     [file join $rtl_dir npukit_top.sv] \
     [file join $rtl_dir npukit_pl.v] \

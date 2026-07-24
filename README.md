@@ -18,17 +18,20 @@ Part of [NetKit Labs](https://github.com/NetKit-Labs) — companion direction to
 | yes | Board bring-up verified on PYNQ-Z2 (DMA + AXI-Lite control, **12/12 PASS**) |
 | yes | Keep both paths: DMA for matrix tiles, MMIO/AXI-Lite for control (+ fallback) |
 | yes | Saved notebook run: classic 8×8 + tiled 16×16 / 32×32 dumps in `npukit_matmul.ipynb` |
-| yes | **Hardware MVP complete** — next work is mostly runtime / models |
-| later | Quantization, tiny end-to-end NN on host+GEMM; optional HW polish |
+| yes | **Hardware MVP complete** (GEMM) |
+| yes | Transformer glue (`rtl/npukit_glue.sv`): residual / GELU / RMSNorm / Softmax — board PASS @ 100 MHz |
+| host | `host/npukit_transformer.py` drives glue + GEMM; RoPE/mask/reshape stay on A9 |
+| later | Quantized end-to-end tiny transformer; optional depthwise / ping-pong |
 
 ## Hierarchy
 
 ```
 npukit_pl.v                 BD wrapper (AXI4-Lite + AXIS + btn/led)
 └── npukit_top.sv           heartbeat + reset combine
-    └── npukit_axil.sv      regs, BRAM A/B/C, AXIS, sequencer
-        └── systolic_array.sv
-            └── pe.sv × 64     (DSP48E1 MAC)
+    └── npukit_axil.sv      regs, BRAM A/B/C, AXIS, GEMM sequencer
+        ├── systolic_array.sv
+        │   └── pe.sv × 64     (DSP48E1 MAC)
+        └── npukit_glue.sv     residual / GELU / RMSNorm / Softmax
 ```
 
 Placed utilization (Zynq-7020, DMA bitstream): **~13% LUT, ~9% FF, 64 DSP (29%), 2 BRAM tiles**  
@@ -41,13 +44,18 @@ Base address (BD default target): **`0x43C0_0000`**
 | Offset | Name | Access | Description |
 |--------|------|--------|-------------|
 | `0x000` | ID | R | `0x4E50554B` (`NPUK`) |
-| `0x004` | VERSION | R | `0x00000200` |
-| `0x008` | STATUS | R | `[0]` busy, `[1]` done, `[2]` AXIS RX done, `[3]` AXIS TX done |
+| `0x004` | VERSION | R | `0x00000300` (glue-enabled bitstreams) |
+| `0x008` | STATUS | R | `[0]` busy, `[1]` gemm done, `[2]` AXIS RX, `[3]` AXIS TX, `[4]` glue done |
 | `0x00C` | CTRL | W | `[0]` start, `[1]` clear, `[2]` arm C AXIS TX (all write-1 pulses) |
 | `0x010` | N | R | `8` |
+| `0x014` | FEATURES | R | `[0]` GEMM, `[1]` GLUE |
+| `0x018` | GLUE_CTRL | W | `[0]` start, `[7:4]` opcode — see `docs/transformer_glue.md` |
+| `0x01C` | GLUE_LEN | R/W | vector length `1..16` |
+| `0x020` | GLUE_PARAM | R/W | e.g. RMSNorm ε (Q12) |
 | `0x100`–`0x13F` | A | R/W | 64× int8 packed as 16× `uint32` (LE), row-major |
 | `0x200`–`0x23F` | B | R/W | same packing |
 | `0x400`–`0x4FF` | C | R | 64× int32, row-major |
+| `0x500`–`0x8FF` | GLUE banks | R/W | X / Y / OUT / GAMMA (int32) |
 
 AXIS packets are 16 packed `uint32` A words then 16 B words, with `TLAST` on word 32; C returns 64 `int32` words after `CTRL.tx_arm`. For a K-tiled result, issue `CTRL=3` for the first tile and `CTRL=1` thereafter; `start` alone preserves the PE accumulators.
 
@@ -116,6 +124,20 @@ How host tiling and the inner dimension $K$ work (with a 16×16 worked example):
 
 The PYNQ host/`ipynb` print **A**, **B**, **C_npu**, **C_ref**, and a tiling plan for every case (pass `--quiet` on the CLI to suppress). After running the notebook, save it so those dumps stay in the file.
 
+## Transformer glue
+
+Common transformer epilogue ops (residual, GELU, RMSNorm, Softmax) are in fabric via **`rtl/npukit_glue.sv`**; RoPE / masks / reshape stay on the A9. See **[`docs/transformer_glue.md`](docs/transformer_glue.md)** and drive with:
+
+```bash
+# Offline fixed-point reference (no board):
+python3 host/npukit_transformer.py --ref-only
+
+# On PYNQ after rebuilding a v0x300 bitstream:
+python3 host/npukit_transformer.py /home/xilinx/jupyter_notebooks/npukit.bit
+```
+
+Simulate glue: `iverilog -g2012 -o sim/npukit_glue_tb.vvp rtl/npukit_glue.sv sim/npukit_glue_tb.sv && vvp sim/npukit_glue_tb.vvp`
+
 ## Visualize
 
 ```bash
@@ -127,10 +149,10 @@ python3 viz/systolic_anim.py          # Pillow GIF → viz/out/systolic_8x8.gif
 
 ```
 npukit/
-  rtl/           pe, systolic_array, npukit_axil, npukit_top, npukit_pl
-  sim/           pe_tb, systolic_array_tb, npukit_axil_tb
-  host/          npukit_matmul.py, npukit_matmul.ipynb
-  docs/          tiling.md (math + worked example)
+  rtl/           pe, systolic_array, npukit_glue, npukit_axil, npukit_top, npukit_pl
+  sim/           pe_tb, systolic_array_tb, npukit_axil_tb, npukit_glue_tb
+  host/          npukit_matmul.py, npukit_matmul.ipynb, npukit_transformer.py
+  docs/          tiling.md, transformer_glue.md
   viz/           animation scripts
   constraints/   pynq_z2.xdc (btn/led; clock from PS FCLK0)
   scripts/       create_project.tcl, build_bitstream.tcl, pynq_bitstream.tcl
