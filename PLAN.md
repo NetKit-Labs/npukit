@@ -71,4 +71,4 @@ Placed util for the current DMA bitstream: **~13% LUT, ~9% FF, 64 DSP (29%), 2 B
 
 Those **2 BRAM tiles** are Vivado’s packing of the three small logical memories (`a_mem`, `b_mem`, `c_mem` — one 8×8 tile each). They are **not** ping-pong buffers and **not** two concurrent matrix slots. Larger MxKxN products are tiled in software over the single A/B/C tile buffers.
 
-Scaling the PE grid \(8→16\) is still \(4×\) array area (~256 DSPs needed for 1:1 MAC mapping; the chip has 220), so prefer **stay 8×8 + tile + DMA**, optionally add ping-pong later to overlap load and compute.
+Scaling the PE grid $8→16$ is still $4×$ array area (~256 DSPs needed for 1:1 MAC mapping; the chip has 220), so prefer **stay 8×8 + tile + DMA**, optionally add ping-pong later to overlap load and compute.

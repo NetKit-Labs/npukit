@@ -112,7 +112,7 @@ With the matching `.hwh`, the host prefers Overlay + DMA for matrices and still 
 
 ## Tiling math
 
-How host tiling and the inner dimension \(K\) work (with a 16×16 worked example): **[`docs/tiling.md`](docs/tiling.md)**.
+How host tiling and the inner dimension $K$ work (with a 16×16 worked example): **[`docs/tiling.md`](docs/tiling.md)**.
 
 The PYNQ host/`ipynb` print **A**, **B**, **C_npu**, **C_ref**, and a tiling plan for every case (pass `--quiet` on the CLI to suppress). After running the notebook, save it so those dumps stay in the file.
 
