@@ -307,6 +307,16 @@ def run_ref_suite() -> int:
     return 0
 
 
+def _fmt_vec(name: str, v: np.ndarray, *, as_q12: bool = False, as_q16: bool = False) -> str:
+    flat = np.asarray(v, dtype=np.int32).reshape(-1)
+    lines = [f"{name} int32: {flat.tolist()}"]
+    if as_q12:
+        lines.append(f"{name} float(Q12): {np.round(from_q12(flat), 6).tolist()}")
+    if as_q16:
+        lines.append(f"{name} float(Q16): {np.round(from_q16(flat), 6).tolist()}")
+    return "\n".join(lines)
+
+
 def run_board(bit_path: str) -> int:
     from npukit_matmul import open_device  # type: ignore
 
@@ -334,13 +344,22 @@ def run_board(bit_path: str) -> int:
             OP_RMSNORM: lambda: ref_rmsnorm(x, kw["gamma"], kw.get("param", 1)),
             OP_SOFTMAX: lambda: ref_softmax(x),
         }
+        print(f"\n=== {name} ===")
+        print(_fmt_vec("X", x, as_q12=True))
+        if "y" in kw:
+            print(_fmt_vec("Y", kw["y"], as_q12=True))
+        if "gamma" in kw:
+            print(_fmt_vec("GAMMA", kw["gamma"], as_q12=True))
         got = glue.run(opcode, x, **kw)
         exp = refs[opcode]()
+        out_q16 = opcode == OP_SOFTMAX
+        print(_fmt_vec("OUT_npu", got, as_q12=not out_q16, as_q16=out_q16))
+        print(_fmt_vec("OUT_ref", exp, as_q12=not out_q16, as_q16=out_q16))
         # Softmax / gelu are approx — allow small abs tol in integer domain
         tol = 64 if opcode in (OP_GELU, OP_SOFTMAX, OP_RMSNORM) else 0
-        ok = bool(np.max(np.abs(got.astype(np.int64) - exp.astype(np.int64))) <= tol)
-        print(f"{name}: {'PASS' if ok else 'FAIL'}  max|err|="
-              f"{int(np.max(np.abs(got.astype(np.int64) - exp.astype(np.int64))))}")
+        err = int(np.max(np.abs(got.astype(np.int64) - exp.astype(np.int64))))
+        ok = err <= tol
+        print(f"{name}: {'PASS' if ok else 'FAIL'}  max|err|={err}  tol={tol}")
         return ok
 
     x = to_q12(np.array([0.5, -0.25, 1.0, -1.5]))
@@ -355,16 +374,22 @@ def run_board(bit_path: str) -> int:
     ok &= check("softmax", OP_SOFTMAX, logits)
 
     # One GEMM tile still works through the same device
+    print("\n=== gemm tile (same bitstream) ===")
     a = np.eye(8, dtype=np.int8)
     b = np.arange(64, dtype=np.int8).reshape(8, 8)
     from npukit_matmul import npu_matmul
 
     c, _ = npu_matmul(mmio, transport, a, b)
-    gemm_ok = bool(np.array_equal(c, a.astype(np.int32) @ b.astype(np.int32)))
+    ref_c = a.astype(np.int32) @ b.astype(np.int32)
+    print("A (int8):\n", a)
+    print("B (int8):\n", b)
+    print("C_npu (int32):\n", c)
+    print("C_ref (int32):\n", ref_c)
+    gemm_ok = bool(np.array_equal(c, ref_c))
     ok &= gemm_ok
     print(f"gemm tile: {'PASS' if gemm_ok else 'FAIL'}")
 
-    print("ALL BOARD PASS" if ok else "BOARD FAIL")
+    print("\nALL BOARD PASS" if ok else "\nBOARD FAIL")
     return 0 if ok else 1
 
 

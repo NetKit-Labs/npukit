@@ -20,8 +20,8 @@ Part of [NetKit Labs](https://github.com/NetKit-Labs) — companion direction to
 | yes | Saved notebook run: classic 8×8 + tiled 16×16 / 32×32 dumps in `npukit_matmul.ipynb` |
 | yes | **Hardware MVP complete** (GEMM) |
 | yes | Transformer glue (`rtl/npukit_glue.sv`): residual / GELU / RMSNorm / Softmax — board PASS @ 100 MHz |
-| host | `host/npukit_transformer.py` drives glue + GEMM; RoPE/mask/reshape stay on A9 |
-| later | Quantized end-to-end tiny transformer; optional depthwise / ping-pong |
+| yes | Host `host/npukit_transformer.py` + `.ipynb` (glue + GEMM); RoPE / mask / reshape stay on A9 |
+| later | Quantized end-to-end tiny transformer; optional depthwise / ping-pong / larger glue `MAX_LEN` |
 
 ## Hierarchy
 
@@ -34,8 +34,8 @@ npukit_pl.v                 BD wrapper (AXI4-Lite + AXIS + btn/led)
         └── npukit_glue.sv     residual / GELU / RMSNorm / Softmax
 ```
 
-Placed utilization (Zynq-7020, DMA bitstream): **~13% LUT, ~9% FF, 64 DSP (29%), 2 BRAM tiles**  
-(~87% LUT, ~91% FF, ~71% DSP, ~99% BRAM still free; DSPs are the main limit if the array grows).
+Placed utilization (Zynq-7020): GEMM-only DMA bit was **~13% LUT / 64 DSP**; with transformer glue
+**~18–19% LUT / ~72 DSP**. Plenty of headroom; DSPs remain the main limit if the PE grid grows.
 
 ## AXI-Lite register map
 
@@ -52,10 +52,11 @@ Base address (BD default target): **`0x43C0_0000`**
 | `0x018` | GLUE_CTRL | W | `[0]` start, `[7:4]` opcode — see `docs/transformer_glue.md` |
 | `0x01C` | GLUE_LEN | R/W | vector length `1..16` |
 | `0x020` | GLUE_PARAM | R/W | e.g. RMSNorm ε (Q12) |
+| `0x024` | GLUE_COUNT | R | increments each completed glue op (preferred host sync) |
 | `0x100`–`0x13F` | A | R/W | 64× int8 packed as 16× `uint32` (LE), row-major |
 | `0x200`–`0x23F` | B | R/W | same packing |
 | `0x400`–`0x4FF` | C | R | 64× int32, row-major |
-| `0x500`–`0x8FF` | GLUE banks | R/W | X / Y / OUT / GAMMA (int32) |
+| `0x500`–`0x8FF` | GLUE banks | R/W | X / Y / OUT / GAMMA (**int32** Q12; Softmax OUT Q16), len ≤ 16 |
 
 AXIS packets are 16 packed `uint32` A words then 16 B words, with `TLAST` on word 32; C returns 64 `int32` words after `CTRL.tx_arm`. For a K-tiled result, issue `CTRL=3` for the first tile and `CTRL=1` thereafter; `start` alone preserves the PE accumulators.
 
@@ -126,13 +127,17 @@ The PYNQ host/`ipynb` print **A**, **B**, **C_npu**, **C_ref**, and a tiling pla
 
 ## Transformer glue
 
-Common transformer epilogue ops (residual, GELU, RMSNorm, Softmax) are in fabric via **`rtl/npukit_glue.sv`**; RoPE / masks / reshape stay on the A9. See **[`docs/transformer_glue.md`](docs/transformer_glue.md)** and drive with:
+Common transformer epilogue ops (residual, GELU, RMSNorm, Softmax) are in fabric via **`rtl/npukit_glue.sv`** (`MAX_LEN=16`, 100 MHz closed). RoPE / masks / reshape stay on the A9.
+
+- **FPGA vs CPU split:** **[`docs/transformer_split.md`](docs/transformer_split.md)**
+- Contract + opcodes: **[`docs/transformer_glue.md`](docs/transformer_glue.md)**
+- Bring-up history / bit-width notes: **[`docs/glue_bringup.md`](docs/glue_bringup.md)**
 
 ```bash
 # Offline fixed-point reference (no board):
 python3 host/npukit_transformer.py --ref-only
 
-# On PYNQ after rebuilding a v0x300 bitstream:
+# On PYNQ (sudo + XRT/venv; bit at VERSION 0x300):
 python3 host/npukit_transformer.py /home/xilinx/jupyter_notebooks/npukit.bit
 ```
 
@@ -151,8 +156,8 @@ python3 viz/systolic_anim.py          # Pillow GIF → viz/out/systolic_8x8.gif
 npukit/
   rtl/           pe, systolic_array, npukit_glue, npukit_axil, npukit_top, npukit_pl
   sim/           pe_tb, systolic_array_tb, npukit_axil_tb, npukit_glue_tb
-  host/          npukit_matmul.py, npukit_matmul.ipynb, npukit_transformer.py
-  docs/          tiling.md, transformer_glue.md
+  host/          npukit_matmul.py/.ipynb, npukit_transformer.py/.ipynb
+  docs/          tiling.md, transformer_glue.md, transformer_split.md, glue_bringup.md
   viz/           animation scripts
   constraints/   pynq_z2.xdc (btn/led; clock from PS FCLK0)
   scripts/       create_project.tcl, build_bitstream.tcl, pynq_bitstream.tcl
@@ -161,14 +166,15 @@ npukit/
 
 ## Design notes
 
-- **Output-stationary:** each PE keeps its accumulator; A/B stream past.
+- **Output-stationary:** each PE keeps its **int32** accumulator; A/B are **int8** streams.
+- **Widths:** GEMM is int8→int32; glue MMIO banks are **int32** Q12/Q16 for a **32-bit** A9/MCU driver. Any `[63:0]` in glue RTL is an **internal mul/div widening** in fabric, not a 64-bit host ABI — see [`docs/glue_bringup.md`](docs/glue_bringup.md).
 - PL fabric clock is **PS FCLK0 (100 MHz)**; AXI-Lite on **M_AXI_GP0**; DMA data on **S_AXI_HP0**.
 - Host software runs on the **Zynq A9 / PYNQ Linux** (not on a laptop). It tiles MxKxN as 8×8 blocks and accumulates over K in the PE registers.
 - **MMIO ≠ AXI-Lite:** AXI-Lite is the bus protocol; MMIO is the CPU mapping of those registers. We keep MMIO (control + fallback) and DMA (matrix payloads) together.
 - **A/B/C memories:** three logical tile buffers (`a_mem` / `b_mem` / `c_mem`) — one 8×8 A tile, one 8×8 B tile, one 8×8 C result. Vivado may report **2 BRAM tiles** for packing; that is a utilization detail, not ping-pong or two matrix slots.
 - **NN coverage:** an int8 GEMM is enough for MLP / FC and 1×1 conv; standard conv can use `im2col`→GEMM later. No dedicated 3×3 / depthwise engine for now.
-- **Host vs PL:** bias, ReLU, pooling, reshape, quant/scales, softmax/argmax, and orchestration stay on the **runtime (A9)** first. Optional later PL: fused bias+ReLU, ping-pong buffers — only if profiling warrants it.
-- **Sim:** `npukit_axil_tb` covers AXI-Lite (+ accumulate). Do not Icarus-sim the Xilinx DMA IP; optional later: AXIS stimulus in that TB.
+- **Host vs PL:** RoPE, masks, reshape/pack, quant/scales, and orchestration stay on the **A9**. Residual / GELU / RMSNorm / Softmax (len≤16) are in **glue**. Optional later: fused bias+ReLU, ping-pong, larger glue vectors.
+- **Sim:** `npukit_axil_tb` covers AXI-Lite (+ accumulate); `npukit_glue_tb` covers glue. Do not Icarus-sim the Xilinx DMA IP.
 - BD helper: `scripts/pynq_bitstream.tcl` (`use_axi_lite=1`, `use_axi_dma=1`).
 
 ## License
