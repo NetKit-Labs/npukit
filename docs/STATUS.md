@@ -43,11 +43,12 @@ Icarus sims under `sim/` remain host-side RTL checks; they are separate from the
 ## Next path
 
 1. **MNIST tiny-ViT (host)** — stay **T=8** / 28→16 resize for now
-   - `host/train_vit_mnist.py` → `vit_mnist_weights.npz` + `mnist_sample.npz`
-   - Float test ~**81%**; quantized CPU/FPGA path ~**40%** on a 512-img slice (Q12/LUT gap — improve QAT next)
+   - `host/train_vit_mnist.py` → float warm-up + **scale calibration** + STE QAT
+   - Float test ~**81%**; numpy quantized ref ~**79%** (was ~40% before QAT/calibration)
+   - Calibrated scales stored in `vit_mnist_weights.npz` (`scale_act/w/p`)
    - Board smoke: ref vs HW numeric match + batch accuracy
    - Glue `len==16` RTL fix is in-tree; rebuild before T=16 Softmax
-2. **Next:** better quant-aware training / scale calibration to close float↔int8 accuracy gap
+2. **Next:** optional longer train / more QAT; real end-to-end accuracy on full test via board
 3. **Defer:** T=16 geometry, PE-grid growth, ping-pong, depthwise
 
 Related docs: [`transformer_split.md`](transformer_split.md), [`transformer_glue.md`](transformer_glue.md), [`glue_bringup.md`](glue_bringup.md), [`tiling.md`](tiling.md), [`../PLAN.md`](../PLAN.md).

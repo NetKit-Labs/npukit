@@ -340,15 +340,17 @@ def _matmul_q12(
     mmio=None,
     transport=None,
     use_hw: bool,
+    scale_act: float = SCALE_ACT,
+    scale_w: float = SCALE_W,
 ) -> np.ndarray:
     """A(Q12) @ W(int8) via quant(A)*W → dequant Q12."""
-    a_i8 = quant_q12_to_i8(a_q12, SCALE_ACT)
+    a_i8 = quant_q12_to_i8(a_q12, scale_act)
     if use_hw:
         from npukit_matmul import npu_matmul
 
         c_i32, _ = npu_matmul(mmio, transport, a_i8, b_i8)
-        return dequant_gemm_to_q12(c_i32, 1.0 / SCALE_ACT, 1.0 / SCALE_W)
-    return gemm_i8_to_q12(a_i8, b_i8, a_scale=SCALE_ACT, b_scale=SCALE_W)
+        return dequant_gemm_to_q12(c_i32, 1.0 / scale_act, 1.0 / scale_w)
+    return gemm_i8_to_q12(a_i8, b_i8, a_scale=scale_act, b_scale=scale_w)
 
 
 def transformer_block_1layer(
@@ -360,6 +362,9 @@ def transformer_block_1layer(
     transport=None,
     use_hw: bool = False,
     verbose: bool = True,
+    scale_act: float = SCALE_ACT,
+    scale_w: float = SCALE_W,
+    scale_p: float = SCALE_P,
 ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     """One pre-norm transformer block: attn + FFN. Shapes [T,D] Q12 in/out.
 
@@ -370,27 +375,29 @@ def transformer_block_1layer(
     assert t <= MAX_LEN and d == E2E_D and d % 8 == 0 and t % 8 == 0
 
     dump: dict[str, np.ndarray] = {"x_in": x_q12.copy()}
+    mm = dict(mmio=mmio, transport=transport, use_hw=use_hw,
+              scale_act=scale_act, scale_w=scale_w)
 
     # --- attention ---
     x_n = _rmsnorm_rows(glue, x_q12, w.gamma1, use_hw=use_hw)
     dump["attn_in_norm"] = x_n.copy()
 
-    q = _matmul_q12(x_n, w.wq, mmio=mmio, transport=transport, use_hw=use_hw)
-    k = _matmul_q12(x_n, w.wk, mmio=mmio, transport=transport, use_hw=use_hw)
-    v = _matmul_q12(x_n, w.wv, mmio=mmio, transport=transport, use_hw=use_hw)
+    q = _matmul_q12(x_n, w.wq, **mm)
+    k = _matmul_q12(x_n, w.wk, **mm)
+    v = _matmul_q12(x_n, w.wv, **mm)
     dump["q"], dump["k"], dump["v"] = q.copy(), k.copy(), v.copy()
 
     # scores = (Q @ K^T) / sqrt(D)  — GEMM on int8 quant of Q and K^T
     k_t = np.ascontiguousarray(k.T)
-    q_i8 = quant_q12_to_i8(q, SCALE_ACT)
-    k_t_i8 = quant_q12_to_i8(k_t, SCALE_ACT)
+    q_i8 = quant_q12_to_i8(q, scale_act)
+    k_t_i8 = quant_q12_to_i8(k_t, scale_act)
     if use_hw:
         from npukit_matmul import npu_matmul
 
         scores_i32, _ = npu_matmul(mmio, transport, q_i8, k_t_i8)
-        scores = dequant_gemm_to_q12(scores_i32, 1.0 / SCALE_ACT, 1.0 / SCALE_ACT)
+        scores = dequant_gemm_to_q12(scores_i32, 1.0 / scale_act, 1.0 / scale_act)
     else:
-        scores = gemm_i8_to_q12(q_i8, k_t_i8, a_scale=SCALE_ACT, b_scale=SCALE_ACT)
+        scores = gemm_i8_to_q12(q_i8, k_t_i8, a_scale=scale_act, b_scale=scale_act)
 
     inv_sqrt = to_q12(np.array(1.0 / math.sqrt(d)))[()]
     scores = ((scores.astype(np.int64) * int(inv_sqrt)) >> Q12).astype(np.int32)
@@ -399,18 +406,18 @@ def transformer_block_1layer(
     p = _softmax_rows(glue, scores, use_hw=use_hw)
     dump["attn_p"] = p.copy()
 
-    p_i8 = quant_q16_to_i8(p, SCALE_P)
-    v_i8 = quant_q12_to_i8(v, SCALE_ACT)
+    p_i8 = quant_q16_to_i8(p, scale_p)
+    v_i8 = quant_q12_to_i8(v, scale_act)
     if use_hw:
         from npukit_matmul import npu_matmul
 
         attn_i32, _ = npu_matmul(mmio, transport, p_i8, v_i8)
-        attn = dequant_gemm_to_q12(attn_i32, 1.0 / SCALE_P, 1.0 / SCALE_ACT)
+        attn = dequant_gemm_to_q12(attn_i32, 1.0 / scale_p, 1.0 / scale_act)
     else:
-        attn = gemm_i8_to_q12(p_i8, v_i8, a_scale=SCALE_P, b_scale=SCALE_ACT)
+        attn = gemm_i8_to_q12(p_i8, v_i8, a_scale=scale_p, b_scale=scale_act)
     dump["attn"] = attn.copy()
 
-    attn_o = _matmul_q12(attn, w.wo, mmio=mmio, transport=transport, use_hw=use_hw)
+    attn_o = _matmul_q12(attn, w.wo, **mm)
     dump["attn_proj"] = attn_o.copy()
 
     x2 = _residual_rows(glue, x_q12, attn_o, use_hw=use_hw)
@@ -419,11 +426,11 @@ def transformer_block_1layer(
     # --- FFN ---
     x_n2 = _rmsnorm_rows(glue, x2, w.gamma2, use_hw=use_hw)
     dump["ffn_in_norm"] = x_n2.copy()
-    h = _matmul_q12(x_n2, w.w1, mmio=mmio, transport=transport, use_hw=use_hw)
+    h = _matmul_q12(x_n2, w.w1, **mm)
     dump["ffn_h"] = h.copy()
     h = _gelu_rows(glue, h, use_hw=use_hw)
     dump["ffn_gelu"] = h.copy()
-    h = _matmul_q12(h, w.w2, mmio=mmio, transport=transport, use_hw=use_hw)
+    h = _matmul_q12(h, w.w2, **mm)
     dump["ffn_out"] = h.copy()
     y = _residual_rows(glue, x2, h, use_hw=use_hw)
     dump["y_out"] = y.copy()

@@ -56,6 +56,9 @@ class VitMnistWeights:
     pos: np.ndarray  # [T, D] Q12
     block: nt.TinyBlockWeights
     w_cls: np.ndarray  # [D, N_CLASS] int8
+    scale_act: float = nt.SCALE_ACT
+    scale_w: float = nt.SCALE_W
+    scale_p: float = nt.SCALE_P
 
     @staticmethod
     def make(rng: np.random.Generator) -> "VitMnistWeights":
@@ -78,11 +81,17 @@ class VitMnistWeights:
             gamma1=np.asarray(data["gamma1"], dtype=np.int32),
             gamma2=np.asarray(data["gamma2"], dtype=np.int32),
         )
+        scale_act = float(data["scale_act"][0]) if "scale_act" in data.files else nt.SCALE_ACT
+        scale_w = float(data["scale_w"][0]) if "scale_w" in data.files else nt.SCALE_W
+        scale_p = float(data["scale_p"][0]) if "scale_p" in data.files else nt.SCALE_P
         return VitMnistWeights(
             w_pe=np.asarray(data["w_pe"], dtype=np.int8),
             pos=np.asarray(data["pos"], dtype=np.int32),
             block=block,
             w_cls=np.asarray(data["w_cls"], dtype=np.int8),
+            scale_act=scale_act,
+            scale_w=scale_w,
+            scale_p=scale_p,
         )
 
 
@@ -182,16 +191,24 @@ def embed_patches_q12(
 ) -> np.ndarray:
     """Patch linear (GEMM) + position residual (glue if HW)."""
     x_q12 = nt.to_q12(np.asarray(patches, dtype=np.float64))
-    tokens = nt._matmul_q12(x_q12, w.w_pe, mmio=mmio, transport=transport, use_hw=use_hw)
+    tokens = nt._matmul_q12(
+        x_q12,
+        w.w_pe,
+        mmio=mmio,
+        transport=transport,
+        use_hw=use_hw,
+        scale_act=w.scale_act,
+        scale_w=w.scale_w,
+    )
     return nt._residual_rows(glue, tokens, w.pos, use_hw=use_hw)
 
 
 def classify_tokens_cpu(tokens_q12: np.ndarray, w: VitMnistWeights) -> np.ndarray:
     """Mean-pool + linear head on CPU (N_CLASS=10 is not a multiple of 8)."""
     pooled_q12 = np.rint(tokens_q12.astype(np.float64).mean(axis=0)).astype(np.int32)
-    a_i8 = nt.quant_q12_to_i8(pooled_q12.reshape(1, -1), nt.SCALE_ACT)
+    a_i8 = nt.quant_q12_to_i8(pooled_q12.reshape(1, -1), w.scale_act)
     return nt.gemm_i8_to_q12(
-        a_i8, w.w_cls, a_scale=nt.SCALE_ACT, b_scale=nt.SCALE_W
+        a_i8, w.w_cls, a_scale=w.scale_act, b_scale=w.scale_w
     ).reshape(-1)
 
 
@@ -224,6 +241,9 @@ def vit_forward(
         transport=transport,
         use_hw=use_hw,
         verbose=verbose,
+        scale_act=w.scale_act,
+        scale_w=w.scale_w,
+        scale_p=w.scale_p,
     )
     dump.update({f"block.{k}": v for k, v in block_dump.items()})
     dump["tokens_out"] = y.copy()
@@ -261,7 +281,7 @@ def run_vit_smoke(
 
     print("=== MNIST tiny-ViT smoke ===")
     print(f"IMG={IMG} PATCH={PATCH} T={VIT_T} D={VIT_D} classes={N_CLASS}")
-    print(f"scales ACT/W/P={nt.SCALE_ACT}/{nt.SCALE_W}/{nt.SCALE_P}")
+    print(f"scales ACT/W/P={w.scale_act:.2f}/{w.scale_w:.2f}/{w.scale_p:.2f}")
     print(f"weights={wsrc}")
 
     glue = mmio = transport = None
