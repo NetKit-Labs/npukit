@@ -39,17 +39,18 @@ Geometry (no resize):
 - Native **28×28**, patch **7** → **T=16** tokens
 - Patch vector **49** zero-padded to **56** (GEMM 8-alignment)
 - Model dim **D=16** (glue max; GEMM host-tiles); **2 layers** host-scheduled on same GEMM+glue
+- **Per-stage quant scales** (embed / block0 / block1 / cls); per-head scales deferred until multi-head
 - Class head on CPU (`N_CLASS=10`)
 
-Train path: full MNIST 60k + shift aug → float warm-up → scale calibration → STE QAT → export scales in `vit_mnist_weights.npz`.
+Train path: full MNIST 60k + shift aug → per-stage calibration → STE QAT → export in `vit_mnist_weights.npz`.
 
 | Metric | Result |
 |--------|--------|
-| Float test (full) | ~**95.2%** |
-| QAT-mode test (full) | ~**94.9%** |
-| Numpy quantized ref (2048) | ~**79%** (deeper int8 path; QAT fake-quant stays high) |
-| Board sample n=64 | ref **56/64**, hw **52/64**; ref↔hw pred agree **60/64 (93.8%)** |
-| Numeric check | **ALL VIT PASS** (tight L0; L2 abs drift reported; ≥90% pred agree) |
+| Float test (full) | ~**95.1%** |
+| QAT-mode test (full) | ~**95.0%** |
+| Numpy quantized ref (2048) | ~**80%** (still trails QAT; glue/Q12 depth) |
+| Board sample n=64 | ref **56/64**, hw **55/64**; ref↔hw pred agree **63/64 (98.4%)** |
+| Numeric check | **ALL VIT PASS** (tight L0; ≥90% pred agree) |
 
 “ALL VIT PASS” means FPGA matches the quantized ref within tolerance — **not** 100% classification accuracy.
 

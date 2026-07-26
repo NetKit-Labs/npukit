@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -66,22 +66,57 @@ def _block_from_npz(data, layer: int | None) -> nt.TinyBlockWeights:
     )
 
 
+@dataclass(frozen=True)
+class QuantScales:
+    """int8 quant scales for one stage (embed / block / cls)."""
+
+    act: float = nt.SCALE_ACT
+    w: float = nt.SCALE_W
+    p: float = nt.SCALE_P  # attention probs; unused for embed/cls
+
+
+def _default_scales(n: int) -> tuple[QuantScales, ...]:
+    return tuple(QuantScales() for _ in range(n))
+
+
 @dataclass
 class VitMnistWeights:
-    """Patch embed + N_LAYERS blocks + linear head (int8 / Q12)."""
+    """Patch embed + N_LAYERS blocks + linear head (int8 / Q12).
+
+    Scales are per-stage: embed, each transformer block, class head.
+    (Per-head scales come later when multi-head attention is added.)
+    """
 
     w_pe: np.ndarray  # [PATCH_DIM, D] int8  (padded patch dim)
     pos: np.ndarray  # [T, D] Q12
     blocks: tuple[nt.TinyBlockWeights, ...]
     w_cls: np.ndarray  # [D, N_CLASS] int8
-    scale_act: float = nt.SCALE_ACT
-    scale_w: float = nt.SCALE_W
-    scale_p: float = nt.SCALE_P
+    scale_embed: QuantScales = field(default_factory=QuantScales)
+    scale_blocks: tuple[QuantScales, ...] = field(default_factory=tuple)
+    scale_cls: QuantScales = field(default_factory=QuantScales)
+
+    def __post_init__(self) -> None:
+        if not self.scale_blocks:
+            self.scale_blocks = _default_scales(
+                len(self.blocks) if self.blocks else N_LAYERS
+            )
 
     @property
     def block(self) -> nt.TinyBlockWeights:
-        """First block (compat)."""
         return self.blocks[0]
+
+    @property
+    def scale_act(self) -> float:
+        """Legacy: first block act scale."""
+        return self.scale_blocks[0].act if self.scale_blocks else self.scale_embed.act
+
+    @property
+    def scale_w(self) -> float:
+        return self.scale_blocks[0].w if self.scale_blocks else self.scale_embed.w
+
+    @property
+    def scale_p(self) -> float:
+        return self.scale_blocks[0].p if self.scale_blocks else nt.SCALE_P
 
     @staticmethod
     def make(rng: np.random.Generator) -> "VitMnistWeights":
@@ -89,7 +124,15 @@ class VitMnistWeights:
         pos = nt.to_q12(rng.normal(0.0, 0.05, size=(VIT_T, VIT_D)))
         blocks = tuple(nt.TinyBlockWeights.make(rng, VIT_D) for _ in range(N_LAYERS))
         w_cls = nt.quant_weight_to_i8(rng.normal(0.0, 0.12, size=(VIT_D, N_CLASS)))
-        return VitMnistWeights(w_pe=w_pe, pos=pos, blocks=blocks, w_cls=w_cls)
+        return VitMnistWeights(
+            w_pe=w_pe,
+            pos=pos,
+            blocks=blocks,
+            w_cls=w_cls,
+            scale_embed=QuantScales(),
+            scale_blocks=_default_scales(N_LAYERS),
+            scale_cls=QuantScales(),
+        )
 
     @staticmethod
     def load(path: str | Path) -> "VitMnistWeights":
@@ -106,17 +149,41 @@ class VitMnistWeights:
                 f"{path} has {len(blocks)} layer(s); need {N_LAYERS}. Re-run train_vit_mnist.py"
             )
         blocks = blocks[:N_LAYERS]
-        scale_act = float(data["scale_act"][0]) if "scale_act" in data.files else nt.SCALE_ACT
-        scale_w = float(data["scale_w"][0]) if "scale_w" in data.files else nt.SCALE_W
-        scale_p = float(data["scale_p"][0]) if "scale_p" in data.files else nt.SCALE_P
+
+        # Legacy global scales → broadcast; prefer per-stage keys when present.
+        leg_a = float(data["scale_act"][0]) if "scale_act" in data.files else nt.SCALE_ACT
+        leg_w = float(data["scale_w"][0]) if "scale_w" in data.files else nt.SCALE_W
+        leg_p = float(data["scale_p"][0]) if "scale_p" in data.files else nt.SCALE_P
+
+        def _sc(prefix: str, *, need_p: bool) -> QuantScales:
+            a = float(data[f"{prefix}_act"][0]) if f"{prefix}_act" in data.files else leg_a
+            w = float(data[f"{prefix}_w"][0]) if f"{prefix}_w" in data.files else leg_w
+            p = (
+                float(data[f"{prefix}_p"][0])
+                if f"{prefix}_p" in data.files
+                else (leg_p if need_p else nt.SCALE_P)
+            )
+            return QuantScales(act=a, w=w, p=p)
+
+        if "scale_embed_act" in data.files or "scale_block0_act" in data.files:
+            scale_embed = _sc("scale_embed", need_p=False)
+            scale_blocks = tuple(
+                _sc(f"scale_block{i}", need_p=True) for i in range(len(blocks))
+            )
+            scale_cls = _sc("scale_cls", need_p=False)
+        else:
+            scale_embed = QuantScales(act=leg_a, w=leg_w)
+            scale_blocks = tuple(QuantScales(act=leg_a, w=leg_w, p=leg_p) for _ in blocks)
+            scale_cls = QuantScales(act=leg_a, w=leg_w)
+
         return VitMnistWeights(
             w_pe=np.asarray(data["w_pe"], dtype=np.int8),
             pos=np.asarray(data["pos"], dtype=np.int32),
             blocks=blocks,
             w_cls=np.asarray(data["w_cls"], dtype=np.int8),
-            scale_act=scale_act,
-            scale_w=scale_w,
-            scale_p=scale_p,
+            scale_embed=scale_embed,
+            scale_blocks=scale_blocks,
+            scale_cls=scale_cls,
         )
 
 
@@ -216,8 +283,8 @@ def embed_patches_q12(
         mmio=mmio,
         transport=transport,
         use_hw=use_hw,
-        scale_act=w.scale_act,
-        scale_w=w.scale_w,
+        scale_act=w.scale_embed.act,
+        scale_w=w.scale_embed.w,
     )
     return nt._residual_rows(glue, tokens, w.pos, use_hw=use_hw)
 
@@ -225,9 +292,9 @@ def embed_patches_q12(
 def classify_tokens_cpu(tokens_q12: np.ndarray, w: VitMnistWeights) -> np.ndarray:
     """Mean-pool + linear head on CPU (N_CLASS=10 is not a multiple of 8)."""
     pooled_q12 = np.rint(tokens_q12.astype(np.float64).mean(axis=0)).astype(np.int32)
-    a_i8 = nt.quant_q12_to_i8(pooled_q12.reshape(1, -1), w.scale_act)
+    a_i8 = nt.quant_q12_to_i8(pooled_q12.reshape(1, -1), w.scale_cls.act)
     return nt.gemm_i8_to_q12(
-        a_i8, w.w_cls, a_scale=w.scale_act, b_scale=w.scale_w
+        a_i8, w.w_cls, a_scale=w.scale_cls.act, b_scale=w.scale_cls.w
     ).reshape(-1)
 
 
@@ -255,6 +322,7 @@ def vit_forward(
 
     y = tokens
     for li, blk in enumerate(w.blocks):
+        sc = w.scale_blocks[li]
         y, block_dump = nt.transformer_block_1layer(
             y,
             blk,
@@ -263,9 +331,9 @@ def vit_forward(
             transport=transport,
             use_hw=use_hw,
             verbose=verbose,
-            scale_act=w.scale_act,
-            scale_w=w.scale_w,
-            scale_p=w.scale_p,
+            scale_act=sc.act,
+            scale_w=sc.w,
+            scale_p=sc.p,
         )
         dump.update({f"block{li}.{k}": v for k, v in block_dump.items()})
         # compat alias for last-layer checks / older smoke keys
@@ -309,7 +377,13 @@ def run_vit_smoke(
         f"IMG={IMG} PATCH={PATCH} T={VIT_T} D={VIT_D} layers={N_LAYERS} "
         f"patch_dim={PATCH_DIM_RAW}->pad{PATCH_DIM} classes={N_CLASS}"
     )
-    print(f"scales ACT/W/P={w.scale_act:.2f}/{w.scale_w:.2f}/{w.scale_p:.2f}")
+    print(
+        f"scales embed act/w={w.scale_embed.act:.2f}/{w.scale_embed.w:.2f}  "
+        + " ".join(
+            f"L{i}={s.act:.1f}/{s.w:.1f}/{s.p:.1f}" for i, s in enumerate(w.scale_blocks)
+        )
+        + f"  cls={w.scale_cls.act:.2f}/{w.scale_cls.w:.2f}"
+    )
     print(f"weights={wsrc}")
 
     glue = mmio = transport = None
