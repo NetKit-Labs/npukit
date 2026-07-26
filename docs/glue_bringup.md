@@ -78,7 +78,8 @@ Could we avoid 64-bit divider state? Yes, later options:
 - Keep Softmax on the A9 for tiny \(N\) (was the original PLAN default)
 
 Bring-up chose “correct Q16 Softmax in fabric” first, then paid for it with
-pipelining.
+pipelining. Later cleanup: the divider is **two 32-bit registers** (`div_num` +
+`div_rem`) instead of one 64-bit shift register — same math, tidier fabric.
 
 ### What we deliberately did *not* do
 
@@ -108,8 +109,9 @@ CPU. The bring-up choice was **int32 Q12 banks + int32 MMIO** for a simple
 | Ops | residual, GELU, RMSNorm, Softmax |
 | `MAX_LEN` | **16** (was 64; cut for mux timing) |
 | Clock | PS FCLK0 **100 MHz**, WNS ≈ **+1 ns** |
-| Board | residual / GELU / RMSNorm / Softmax + GEMM tile **PASS** |
-| Host | `host/npukit_transformer.py` |
+| Board | residual / GELU / RMSNorm / Softmax + GEMM tile **PASS**; e2e T=8×D=8 **ALL E2E PASS** |
+| Host | `host/npukit_transformer.py`, `host/npukit_transformer_e2e.ipynb` |
+| Status | [`STATUS.md`](STATUS.md) |
 | Sync | prefer `GLUE_COUNT` (`0x024`), not sticky `STATUS[4]` alone |
 
 Approx placed util with glue (Z7020): ~**18–19% LUT**, ~**33% DSP** (GEMM 64

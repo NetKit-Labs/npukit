@@ -178,14 +178,14 @@ module npukit_glue #(
     logic                   busy_r, done_r;
     logic [31:0]            complete_count_r;
 
-    logic [63:0]            div_numer;
+    // 32÷32 restoring divider as two 32-bit regs (not one fat 64-bit wire).
+    logic [31:0]            div_num;
     logic [31:0]            div_denom;
     logic [31:0]            div_quot;
-    logic [63:0]            div_rem;
+    logic [31:0]            div_rem;
     logic [5:0]             div_bit;
     logic                   div_busy;
-    logic [63:0]            div_trial;
-    logic                   div_msb;
+    logic [32:0]            div_trial;
 
     logic [63:0]            mean_u;
     logic [31:0]            isqrt_lo, isqrt_hi, isqrt_mid;
@@ -219,7 +219,7 @@ module npukit_glue #(
             inv_rms_q12      <= ONE_Q12;
             sum_exp          <= '0;
             div_busy         <= 1'b0;
-            div_numer        <= '0;
+            div_num          <= '0;
             div_denom        <= 32'd1;
             div_quot         <= '0;
             div_rem          <= '0;
@@ -243,16 +243,15 @@ module npukit_glue #(
             gelu_passthru    <= 1'b0;
             gelu_zero        <= 1'b0;
         end else begin
-            // Restoring divider: shift numer (no variable bit mux).
+            // Restoring divider: MSB of div_num into rem each cycle.
             if (div_busy) begin
-                div_msb   = div_numer[63];
-                div_trial = (div_rem << 1) | {63'd0, div_msb};
-                div_numer <= div_numer << 1;
-                if (div_trial >= {32'd0, div_denom}) begin
-                    div_rem           <= div_trial - {32'd0, div_denom};
+                div_trial = {div_rem, div_num[31]};
+                div_num   <= {div_num[30:0], 1'b0};
+                if (div_trial >= {1'b0, div_denom}) begin
+                    div_rem           <= div_trial[31:0] - div_denom;
                     div_quot[div_bit] <= 1'b1;
                 end else begin
-                    div_rem           <= div_trial;
+                    div_rem           <= div_trial[31:0];
                     div_quot[div_bit] <= 1'b0;
                 end
                 if (div_bit == 6'd0) div_busy <= 1'b0;
@@ -392,7 +391,7 @@ module npukit_glue #(
                 end
 
                 ST_INV_LAUNCH: begin
-                    div_numer <= {ONE_Q12 * ONE_Q12, 32'd0}; // left-aligned for shift divider
+                    div_num   <= ONE_Q12 * ONE_Q12; // 2^24 fits in 32 bits
                     div_denom <= (isqrt_lo == 32'd0) ? 32'd1 : isqrt_lo;
                     div_quot  <= '0;
                     div_rem   <= '0;
@@ -499,8 +498,8 @@ module npukit_glue #(
                 end
 
                 ST_SM_LAUNCH: begin
-                    // quot = (exp << 16) / sum_exp; left-align for MSB-first shift div
-                    div_numer <= {$unsigned(out_mem[idx[IDX_W-1:0]]) << 16, 32'd0};
+                    // quot = (exp << 16) / sum_exp  (32-bit dividend)
+                    div_num   <= $unsigned(out_mem[idx[IDX_W-1:0]]) << 16;
                     div_denom <= (sum_exp == 32'd0) ? 32'd1 : sum_exp;
                     div_quot  <= '0;
                     div_rem   <= '0;

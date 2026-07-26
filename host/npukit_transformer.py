@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """Tiny transformer driver for NpuKit: GEMM on the array + glue on npukit_glue.
 
-Hardware (after bitstream rebuild with VERSION 0x300):
+Hardware (VERSION 0x300):
   - Tile GEMM via npukit_matmul.open_device / npu_matmul
   - Residual, GELU, RMSNorm, Softmax via GLUE_* MMIO banks
 
-CPU still does RoPE, masks, reshape/pack (the weird bits).
+CPU: RoPE / masks / reshape (not used in the e2e smoke), quant/dequant scales.
 
-Fixed-point matches rtl/npukit_glue.sv / docs/transformer_glue.md:
-  activations Q12, softmax probs Q16, gamma Q12.
+Fixed-point: activations Q12, softmax probs Q16, gamma Q12.
+Fixed host scales (int8 GEMM ↔ Q12 glue): see SCALE_ACT / SCALE_W / SCALE_P.
 
 Usage on PYNQ:
   python3 npukit_transformer.py [/path/to/npukit.bit]
+  python3 npukit_transformer.py [/path/to/npukit.bit] --e2e
 
-Offline (no board): exercises the Q12 reference model only:
+Offline:
   python3 npukit_transformer.py --ref-only
+  python3 npukit_transformer.py --e2e-ref
 """
 
 from __future__ import annotations
@@ -58,6 +60,15 @@ ID_MAGIC = 0x4E50554B
 VERSION_GLUE = 0x00000300
 
 MAX_LEN = 16
+
+# E2E smoke geometry (ViT-ready token grid; MNIST patches can replace X later)
+E2E_T = 8  # sequence / tokens  (≤ MAX_LEN)
+E2E_D = 8  # model dim          (matches 8×8 GEMM tile)
+
+# Fixed quant scales (host contract — do not tune per layer in smoke)
+SCALE_ACT = 64.0   # Q12-real → int8 activation: q = clip(round(x * SCALE_ACT))
+SCALE_W = 64.0     # float weight → int8
+SCALE_P = 127.0    # Q16 prob → int8 for P@V
 
 
 def to_q12(x: np.ndarray) -> np.ndarray:
@@ -213,7 +224,7 @@ class GlueDevice:
         return self._read_vec(OFF_GLUE_OUT, n)
 
 
-def quantize_int8_activation(x_q12: np.ndarray, scale: float = 64.0) -> tuple[np.ndarray, float]:
+def quantize_int8_activation(x_q12: np.ndarray, scale: float = SCALE_ACT) -> tuple[np.ndarray, float]:
     """Pack Q12 activations to int8 for GEMM; returns (int8, dequant scale to float)."""
     xf = from_q12(x_q12)
     q = np.clip(np.rint(xf * scale), -128, 127).astype(np.int8)
@@ -221,9 +232,267 @@ def quantize_int8_activation(x_q12: np.ndarray, scale: float = 64.0) -> tuple[np
 
 
 def dequant_gemm_to_q12(c_i32: np.ndarray, a_scale: float, b_scale: float) -> np.ndarray:
-    """Approximate int32 GEMM accumulators back to Q12."""
+    """int32 GEMM accumulators → Q12 using fixed host scales."""
     real = c_i32.astype(np.float64) * a_scale * b_scale
     return to_q12(real)
+
+
+def quant_q12_to_i8(x_q12: np.ndarray, scale: float = SCALE_ACT) -> np.ndarray:
+    xf = from_q12(x_q12)
+    return np.clip(np.rint(xf * scale), -128, 127).astype(np.int8)
+
+
+def quant_weight_to_i8(w: np.ndarray, scale: float = SCALE_W) -> np.ndarray:
+    return np.clip(np.rint(np.asarray(w, dtype=np.float64) * scale), -128, 127).astype(np.int8)
+
+
+def quant_q16_to_i8(p_q16: np.ndarray, scale: float = SCALE_P) -> np.ndarray:
+    pf = from_q16(p_q16)
+    return np.clip(np.rint(pf * scale), -128, 127).astype(np.int8)
+
+
+def gemm_i8_to_q12(a_i8: np.ndarray, b_i8: np.ndarray, *, a_scale: float, b_scale: float) -> np.ndarray:
+    """NumPy stand-in for NPU int8 matmul + fixed dequant → Q12."""
+    c = a_i8.astype(np.int32) @ b_i8.astype(np.int32)
+    return dequant_gemm_to_q12(c, 1.0 / a_scale, 1.0 / b_scale)
+
+
+def _fmt_mat(name: str, mat: np.ndarray, *, as_q12: bool = False, as_q16: bool = False) -> str:
+    arr = np.asarray(mat)
+    lines = [f"{name} shape={arr.shape} dtype={arr.dtype}"]
+    with np.printoptions(linewidth=120, suppress=True, precision=4):
+        lines.append(str(arr))
+    if as_q12 and np.issubdtype(arr.dtype, np.integer):
+        lines.append(f"{name} float(Q12):\n{np.round(from_q12(arr), 4)}")
+    if as_q16 and np.issubdtype(arr.dtype, np.integer):
+        lines.append(f"{name} float(Q16):\n{np.round(from_q16(arr), 4)}")
+    return "\n".join(lines)
+
+
+@dataclass
+class TinyBlockWeights:
+    """1-layer block, D×D int8 weights + Q12 gammas. ViT can reuse this layout."""
+
+    wq: np.ndarray
+    wk: np.ndarray
+    wv: np.ndarray
+    wo: np.ndarray
+    w1: np.ndarray
+    w2: np.ndarray
+    gamma1: np.ndarray
+    gamma2: np.ndarray
+
+    @staticmethod
+    def make(rng: np.random.Generator, d: int = E2E_D) -> "TinyBlockWeights":
+        def w() -> np.ndarray:
+            return quant_weight_to_i8(rng.normal(0.0, 0.15, size=(d, d)))
+
+        g = np.full(d, ONE_Q12, dtype=np.int32)
+        return TinyBlockWeights(w(), w(), w(), w(), w(), w(), g, g)
+
+
+def _rmsnorm_rows(glue_or_none, x_q12: np.ndarray, gamma: np.ndarray, *, use_hw: bool) -> np.ndarray:
+    """RMSNorm each token (row) of shape [T, D]."""
+    out = np.empty_like(x_q12, dtype=np.int32)
+    for t in range(x_q12.shape[0]):
+        if use_hw:
+            out[t] = glue_or_none.run(OP_RMSNORM, x_q12[t], gamma=gamma, param=1)
+        else:
+            out[t] = ref_rmsnorm(x_q12[t], gamma, 1)
+    return out
+
+
+def _residual_rows(glue_or_none, x_q12: np.ndarray, y_q12: np.ndarray, *, use_hw: bool) -> np.ndarray:
+    out = np.empty_like(x_q12, dtype=np.int32)
+    for t in range(x_q12.shape[0]):
+        if use_hw:
+            out[t] = glue_or_none.run(OP_RESIDUAL, x_q12[t], y=y_q12[t])
+        else:
+            out[t] = ref_residual(x_q12[t], y_q12[t])
+    return out
+
+
+def _gelu_rows(glue_or_none, x_q12: np.ndarray, *, use_hw: bool) -> np.ndarray:
+    out = np.empty_like(x_q12, dtype=np.int32)
+    for t in range(x_q12.shape[0]):
+        if use_hw:
+            out[t] = glue_or_none.run(OP_GELU, x_q12[t])
+        else:
+            out[t] = ref_gelu(x_q12[t])
+    return out
+
+
+def _softmax_rows(glue_or_none, scores_q12: np.ndarray, *, use_hw: bool) -> np.ndarray:
+    """Softmax each row → Q16, scores [T, T]."""
+    out = np.empty_like(scores_q12, dtype=np.int32)
+    for t in range(scores_q12.shape[0]):
+        if use_hw:
+            out[t] = glue_or_none.run(OP_SOFTMAX, scores_q12[t])
+        else:
+            out[t] = ref_softmax(scores_q12[t])
+    return out
+
+
+def _matmul_q12(
+    a_q12: np.ndarray,
+    b_i8: np.ndarray,
+    *,
+    mmio=None,
+    transport=None,
+    use_hw: bool,
+) -> np.ndarray:
+    """A(Q12) @ W(int8) via quant(A)*W → dequant Q12."""
+    a_i8 = quant_q12_to_i8(a_q12, SCALE_ACT)
+    if use_hw:
+        from npukit_matmul import npu_matmul
+
+        c_i32, _ = npu_matmul(mmio, transport, a_i8, b_i8)
+        return dequant_gemm_to_q12(c_i32, 1.0 / SCALE_ACT, 1.0 / SCALE_W)
+    return gemm_i8_to_q12(a_i8, b_i8, a_scale=SCALE_ACT, b_scale=SCALE_W)
+
+
+def transformer_block_1layer(
+    x_q12: np.ndarray,
+    w: TinyBlockWeights,
+    *,
+    glue=None,
+    mmio=None,
+    transport=None,
+    use_hw: bool = False,
+    verbose: bool = True,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """One pre-norm transformer block: attn + FFN. Shapes [T,D] Q12 in/out.
+
+    Intermediates dict always filled for notebook dumps. use_hw requires glue+mmio+transport.
+    """
+    x_q12 = np.asarray(x_q12, dtype=np.int32)
+    t, d = x_q12.shape
+    assert t <= MAX_LEN and d == E2E_D and d % 8 == 0 and t % 8 == 0
+
+    dump: dict[str, np.ndarray] = {"x_in": x_q12.copy()}
+
+    # --- attention ---
+    x_n = _rmsnorm_rows(glue, x_q12, w.gamma1, use_hw=use_hw)
+    dump["attn_in_norm"] = x_n.copy()
+
+    q = _matmul_q12(x_n, w.wq, mmio=mmio, transport=transport, use_hw=use_hw)
+    k = _matmul_q12(x_n, w.wk, mmio=mmio, transport=transport, use_hw=use_hw)
+    v = _matmul_q12(x_n, w.wv, mmio=mmio, transport=transport, use_hw=use_hw)
+    dump["q"], dump["k"], dump["v"] = q.copy(), k.copy(), v.copy()
+
+    # scores = (Q @ K^T) / sqrt(D)  — GEMM on int8 quant of Q and K^T
+    k_t = np.ascontiguousarray(k.T)
+    q_i8 = quant_q12_to_i8(q, SCALE_ACT)
+    k_t_i8 = quant_q12_to_i8(k_t, SCALE_ACT)
+    if use_hw:
+        from npukit_matmul import npu_matmul
+
+        scores_i32, _ = npu_matmul(mmio, transport, q_i8, k_t_i8)
+        scores = dequant_gemm_to_q12(scores_i32, 1.0 / SCALE_ACT, 1.0 / SCALE_ACT)
+    else:
+        scores = gemm_i8_to_q12(q_i8, k_t_i8, a_scale=SCALE_ACT, b_scale=SCALE_ACT)
+
+    inv_sqrt = to_q12(np.array(1.0 / math.sqrt(d)))[()]
+    scores = ((scores.astype(np.int64) * int(inv_sqrt)) >> Q12).astype(np.int32)
+    dump["scores"] = scores.copy()
+
+    p = _softmax_rows(glue, scores, use_hw=use_hw)
+    dump["attn_p"] = p.copy()
+
+    p_i8 = quant_q16_to_i8(p, SCALE_P)
+    v_i8 = quant_q12_to_i8(v, SCALE_ACT)
+    if use_hw:
+        from npukit_matmul import npu_matmul
+
+        attn_i32, _ = npu_matmul(mmio, transport, p_i8, v_i8)
+        attn = dequant_gemm_to_q12(attn_i32, 1.0 / SCALE_P, 1.0 / SCALE_ACT)
+    else:
+        attn = gemm_i8_to_q12(p_i8, v_i8, a_scale=SCALE_P, b_scale=SCALE_ACT)
+    dump["attn"] = attn.copy()
+
+    attn_o = _matmul_q12(attn, w.wo, mmio=mmio, transport=transport, use_hw=use_hw)
+    dump["attn_proj"] = attn_o.copy()
+
+    x2 = _residual_rows(glue, x_q12, attn_o, use_hw=use_hw)
+    dump["after_attn_res"] = x2.copy()
+
+    # --- FFN ---
+    x_n2 = _rmsnorm_rows(glue, x2, w.gamma2, use_hw=use_hw)
+    dump["ffn_in_norm"] = x_n2.copy()
+    h = _matmul_q12(x_n2, w.w1, mmio=mmio, transport=transport, use_hw=use_hw)
+    dump["ffn_h"] = h.copy()
+    h = _gelu_rows(glue, h, use_hw=use_hw)
+    dump["ffn_gelu"] = h.copy()
+    h = _matmul_q12(h, w.w2, mmio=mmio, transport=transport, use_hw=use_hw)
+    dump["ffn_out"] = h.copy()
+    y = _residual_rows(glue, x2, h, use_hw=use_hw)
+    dump["y_out"] = y.copy()
+
+    if verbose:
+        for name, mat in dump.items():
+            q16 = name == "attn_p"
+            print(_fmt_mat(name, mat, as_q12=not q16, as_q16=q16))
+            print()
+    return y, dump
+
+
+def run_e2e_smoke(
+    *,
+    bit_path: str | None = None,
+    seed: int = 0,
+) -> int:
+    """1-layer T=8,D=8 block: CPU ref vs optional FPGA; print tensors + PASS/FAIL."""
+    rng = np.random.default_rng(seed)
+    w = TinyBlockWeights.make(rng, E2E_D)
+    # Token grid in Q12 — stand-in for ViT patch embeddings
+    x = to_q12(rng.normal(0.0, 0.4, size=(E2E_T, E2E_D)))
+
+    print("=== E2E smoke: 1-layer transformer block ===")
+    print(f"T={E2E_T} D={E2E_D}  SCALE_ACT={SCALE_ACT} SCALE_W={SCALE_W} SCALE_P={SCALE_P}")
+    print(_fmt_mat("weights.wq (int8)", w.wq))
+    print()
+
+    print("--- CPU / ref path (int8 GEMM mimicked in NumPy + glue refs) ---")
+    y_ref, dump_ref = transformer_block_1layer(x, w, use_hw=False, verbose=True)
+
+    if bit_path is None:
+        print("E2E REF-ONLY PASS (no bitstream)")
+        return 0
+
+    from npukit_matmul import open_device
+
+    mmio, transport = open_device(bit_path)
+    ident = mmio.read(REG_ID)
+    ver = mmio.read(REG_VERSION)
+    feat = mmio.read(REG_FEATURES)
+    print(f"\nID OK version=0x{ver:08X} features=0x{feat:08X}")
+    if ident != ID_MAGIC or ver < VERSION_GLUE or not (feat & FEAT_GLUE):
+        print("E2E FAIL: need glue bitstream VERSION>=0x300")
+        return 1
+
+    glue = GlueDevice(mmio)
+    print("\n--- FPGA path (NPU GEMM + glue) ---")
+    y_hw, dump_hw = transformer_block_1layer(
+        x, w, glue=glue, mmio=mmio, transport=transport, use_hw=True, verbose=True
+    )
+
+    # Tolerances: GEMM quant + glue LUT noise
+    tol = 512
+    ok = True
+    print("\n=== compare ref vs FPGA ===")
+    for key in dump_ref:
+        a, b = dump_ref[key], dump_hw[key]
+        err = int(np.max(np.abs(a.astype(np.int64) - b.astype(np.int64))))
+        # Softmax rows can differ a bit more after score quant
+        t_key = 1024 if key in ("attn_p", "scores", "attn", "attn_proj", "y_out", "ffn_out") else tol
+        passed = err <= t_key
+        ok &= passed
+        print(f"{key}: {'PASS' if passed else 'FAIL'}  max|err|={err}  tol={t_key}")
+
+    err_y = int(np.max(np.abs(y_ref.astype(np.int64) - y_hw.astype(np.int64))))
+    print(f"\ny_out: {'PASS' if err_y <= 1024 else 'FAIL'}  max|err|={err_y}")
+    print("\nALL E2E PASS" if ok else "\nE2E FAIL")
+    return 0 if ok else 1
 
 
 def rope_cpu(x: np.ndarray, base: float = 10000.0) -> np.ndarray:
@@ -395,15 +664,19 @@ def run_board(bit_path: str) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if "--ref-only" in argv or (not argv):
-        # default to ref-only when no bit path so laptop syntax-checks work
-        if "--ref-only" in argv:
-            argv.remove("--ref-only")
-        if not argv:
-            return run_ref_suite()
-    bit = argv[0] if argv else "/home/xilinx/jupyter_notebooks/npukit.bit"
-    if bit == "--ref-only":
+    e2e = "--e2e" in argv
+    e2e_ref = "--e2e-ref" in argv
+    ref_only = "--ref-only" in argv
+    argv = [a for a in argv if a not in ("--e2e", "--e2e-ref", "--ref-only")]
+
+    if e2e_ref or (e2e and (ref_only or not argv)):
+        return run_e2e_smoke(bit_path=None)
+    if ref_only or not argv:
         return run_ref_suite()
+
+    bit = argv[0]
+    if e2e:
+        return run_e2e_smoke(bit_path=bit)
     return run_board(bit)
 
 

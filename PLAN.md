@@ -12,18 +12,18 @@ Start a **small NPU** on PYNQ-Z2: an **8×8 int8 systolic array**, built and ver
 4. **Project skeleton** with AXI-Lite + AXI DMA (PS `M_AXI_GP0` + `S_AXI_HP0`)
 5. **Host** — tiled matmul via `host/npukit_matmul.py` / `.ipynb` (NumPy check)
 
-The **GEMM hardware MVP is complete**. Transformer **glue** (VERSION `0x300`: residual / GELU / RMSNorm / Softmax, `MAX_LEN=16`) meets **100 MHz** and passes on PYNQ-Z2 with `host/npukit_transformer.py`. RoPE / masks / reshape stay on the A9.
+The **GEMM hardware MVP is complete**. Transformer **glue** (VERSION `0x300`: residual / GELU / RMSNorm / Softmax, `MAX_LEN=16`) meets **100 MHz** and passes on PYNQ-Z2 with `host/npukit_transformer.py`. Synthetic 1-layer e2e smoke (T=8×D=8) is **ALL E2E PASS** in `host/npukit_transformer_e2e.ipynb`. RoPE / masks / reshape stay on the A9.
 
-**Next:** quantized end-to-end tiny transformer. **Optional later:** larger glue `MAX_LEN` (BRAM banks), ping-pong tiles, depthwise for DS-CNN, AXIS stimulus in `npukit_axil_tb`.
+**Next:** MNIST tiny-ViT on the host (real patches/weights, quant/dequant, existing GEMM+glue). **Optional later:** larger glue `MAX_LEN` (BRAM banks), ping-pong tiles, depthwise for DS-CNN, AXIS stimulus in `npukit_axil_tb`.
 
-Docs: FPGA vs CPU [`docs/transformer_split.md`](docs/transformer_split.md), glue contract [`docs/transformer_glue.md`](docs/transformer_glue.md), bring-up [`docs/glue_bringup.md`](docs/glue_bringup.md), tiling [`docs/tiling.md`](docs/tiling.md).
+Docs: status [`docs/STATUS.md`](docs/STATUS.md), FPGA vs CPU [`docs/transformer_split.md`](docs/transformer_split.md), glue contract [`docs/transformer_glue.md`](docs/transformer_glue.md), bring-up [`docs/glue_bringup.md`](docs/glue_bringup.md), tiling [`docs/tiling.md`](docs/tiling.md).
 
 ## Project layout
 
 - `rtl/pe.sv`, `rtl/systolic_array.sv`, `rtl/npukit_glue.sv`, `rtl/npukit_axil.sv`, `rtl/npukit_top.sv`, `rtl/npukit_pl.v`
 - `sim/pe_tb.sv`, `sim/systolic_array_tb.sv`, `sim/npukit_axil_tb.sv`, `sim/npukit_glue_tb.sv`
-- `host/npukit_matmul.py`, `host/npukit_matmul.ipynb`, `host/npukit_transformer.py`
-- `docs/tiling.md`, `docs/transformer_split.md`, `docs/transformer_glue.md`, `docs/glue_bringup.md`
+- `host/npukit_matmul.py`, `host/npukit_matmul.ipynb`, `host/npukit_transformer.py`, `host/npukit_transformer_e2e.ipynb`
+- `docs/STATUS.md`, `docs/tiling.md`, `docs/transformer_split.md`, `docs/transformer_glue.md`, `docs/glue_bringup.md`
 - `scripts/create_project.tcl`, `scripts/build_bitstream.tcl`, `scripts/pynq_bitstream.tcl`
 
 ```mermaid
@@ -40,7 +40,7 @@ flowchart LR
     AXIL --> DMA --> HOST
   end
   subgraph later [Later]
-    Q[quant / tiny transformer e2e]
+    Q[MNIST tiny-ViT host]
     PP[optional ping-pong / depthwise]
     HOST --> Q
     HOST --> PP
@@ -74,6 +74,8 @@ An int8 8×8 GEMM covers MLP/FC and 1×1 conv; standard conv can be lowered to G
 
 - GEMM + DMA + host tiling: **done** (board **12/12 PASS**; dumps in `host/npukit_matmul.ipynb`).
 - Transformer glue v0x300: **done** (100 MHz closed; board residual/GELU/RMSNorm/Softmax + GEMM PASS).
+- Synthetic 1-layer e2e T=8×D=8: **done** (**ALL E2E PASS** in `host/npukit_transformer_e2e.ipynb`).
+- Next: MNIST tiny-ViT host path (see [`docs/STATUS.md`](docs/STATUS.md)).
 - Rebuild with `../scripts/build_bitstream.sh npukit` (or in-repo `scripts/`) after RTL/BD changes.
 
 ### Z7020 size note
