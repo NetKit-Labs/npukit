@@ -14,7 +14,7 @@ Start a **small NPU** on PYNQ-Z2: an **8×8 int8 systolic array**, built and ver
 
 The **GEMM hardware MVP is complete**. Transformer **glue** (VERSION `0x300`: residual / GELU / RMSNorm / Softmax, `MAX_LEN=16`) meets **100 MHz** and passes on PYNQ-Z2 with `host/npukit_transformer.py`. Synthetic 1-layer e2e smoke (T=8×D=8) is **ALL E2E PASS** in `host/npukit_transformer_e2e.ipynb`. RoPE / masks / reshape stay on the A9.
 
-**WIP done for MVP path:** MNIST tiny-ViT at **T=16×D=16×L=2** with **per-stage quant scales**. Float/QAT ~95%, board pred agree ~98%, **ALL VIT PASS**. **Optional later:** per-head scales (with MHA), CNN stem, ping-pong, depthwise.
+**Host ViT path done for this MVP:** MNIST tiny-ViT **T=16×D=16×L=2**, host-scheduled layers on the same fabric, **per-stage quant scales**. Float/QAT ~95%, board pred agree ~98%, **ALL VIT PASS**. **Optional later:** per-head scales (with MHA), CNN stem, ping-pong, depthwise.
 
 Docs: status [`docs/STATUS.md`](docs/STATUS.md), FPGA vs CPU [`docs/transformer_split.md`](docs/transformer_split.md), glue contract [`docs/transformer_glue.md`](docs/transformer_glue.md), bring-up [`docs/glue_bringup.md`](docs/glue_bringup.md), tiling [`docs/tiling.md`](docs/tiling.md).
 
@@ -40,9 +40,9 @@ flowchart LR
     AXIL --> DMA --> HOST
   end
   subgraph later [Later]
-    Q[MNIST tiny-ViT host]
+    MH[optional MHA + per-head scales]
     PP[optional ping-pong / depthwise]
-    HOST --> Q
+    HOST --> MH
     HOST --> PP
   end
 ```
@@ -62,7 +62,7 @@ flowchart LR
 |-----------------|-------------|
 | Orchestration, buffers, tiling | 8×8 int8 GEMM + int32 C |
 | Reshape / transpose / `im2col` | Residual, GELU, RMSNorm, Softmax (len≤16) |
-| Quantize / dequantize / scales | |
+| Quantize / dequantize / **per-stage** scales | |
 | RoPE, attention masks | |
 | Vectors longer than glue `MAX_LEN` | |
 
@@ -75,7 +75,7 @@ An int8 8×8 GEMM covers MLP/FC and 1×1 conv; standard conv can be lowered to G
 - GEMM + DMA + host tiling: **done** (board **12/12 PASS**; dumps in `host/npukit_matmul.ipynb`).
 - Transformer glue v0x300: **done** (100 MHz closed; board residual/GELU/RMSNorm/Softmax + GEMM PASS).
 - Synthetic 1-layer e2e T=8×D=8: **done** (**ALL E2E PASS** in `host/npukit_transformer_e2e.ipynb`).
-- Next: MNIST tiny-ViT host path (see [`docs/STATUS.md`](docs/STATUS.md)).
+- MNIST tiny-ViT T=16×D=16×L=2 + per-stage scales: **done** (board **ALL VIT PASS**; see [`docs/STATUS.md`](docs/STATUS.md)).
 - Rebuild with `../scripts/build_bitstream.sh npukit` (or in-repo `scripts/`) after RTL/BD changes.
 
 ### Z7020 size note
