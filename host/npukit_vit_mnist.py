@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """MNIST tiny-ViT host path for NpuKit (GEMM + glue, no RTL changes).
 
-Geometry (fits current board bit; Softmax length ≤ 8 until glue len=MAX_LEN fix is rebuilt):
-  - Resize digit to 16×16
+Geometry (stay at T=8 for now):
+  - Resize digit 28→16
   - Patch size 4 → 16 raw patches, pair-average → T=8 tokens
   - Model dim D=8 (matches 8×8 GEMM tile)
 
@@ -10,12 +10,14 @@ Split:
   - CPU: resize, patchify, pair-pool, position add, mean-pool, class head (10-way; not 8-aligned)
   - FPGA: patch-projection GEMM, 1-layer transformer block (GEMM + glue)
 
-Plumbing + ref-vs-board smoke with seeded random weights — not a trained
-accuracy claim. Train / load real weights later.
+Train weights on the host:
+  python3 host/train_vit_mnist.py
+  → host/vit_mnist_weights.npz , host/mnist_sample.npz
 
 Usage:
   python3 npukit_vit_mnist.py --ref-only
-  python3 npukit_vit_mnist.py /path/to/npukit.bit
+  python3 npukit_vit_mnist.py --ref-only --weights vit_mnist_weights.npz
+  python3 npukit_vit_mnist.py /path/to/npukit.bit --weights vit_mnist_weights.npz
 """
 
 from __future__ import annotations
@@ -23,10 +25,15 @@ from __future__ import annotations
 import argparse
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
 import npukit_transformer as nt
+
+_HOST_DIR = Path(__file__).resolve().parent
+DEFAULT_WEIGHTS = _HOST_DIR / "vit_mnist_weights.npz"
+DEFAULT_SAMPLE = _HOST_DIR / "mnist_sample.npz"
 
 # --- ViT-MNIST geometry (host contract) ---
 IMG = 16
@@ -57,6 +64,26 @@ class VitMnistWeights:
         block = nt.TinyBlockWeights.make(rng, VIT_D)
         w_cls = nt.quant_weight_to_i8(rng.normal(0.0, 0.12, size=(VIT_D, N_CLASS)))
         return VitMnistWeights(w_pe=w_pe, pos=pos, block=block, w_cls=w_cls)
+
+    @staticmethod
+    def load(path: str | Path) -> "VitMnistWeights":
+        data = np.load(path)
+        block = nt.TinyBlockWeights(
+            wq=np.asarray(data["wq"], dtype=np.int8),
+            wk=np.asarray(data["wk"], dtype=np.int8),
+            wv=np.asarray(data["wv"], dtype=np.int8),
+            wo=np.asarray(data["wo"], dtype=np.int8),
+            w1=np.asarray(data["w1"], dtype=np.int8),
+            w2=np.asarray(data["w2"], dtype=np.int8),
+            gamma1=np.asarray(data["gamma1"], dtype=np.int32),
+            gamma2=np.asarray(data["gamma2"], dtype=np.int32),
+        )
+        return VitMnistWeights(
+            w_pe=np.asarray(data["w_pe"], dtype=np.int8),
+            pos=np.asarray(data["pos"], dtype=np.int32),
+            block=block,
+            w_cls=np.asarray(data["w_cls"], dtype=np.int8),
+        )
 
 
 def resize_nearest(img: np.ndarray, size: int = IMG) -> np.ndarray:
@@ -107,14 +134,24 @@ def load_or_synth_batch(
     """Return images [N,28,28] float and labels [N]. Prefers real MNIST if present."""
     rng = np.random.default_rng(seed)
     labels = rng.integers(0, N_CLASS, size=n)
-    for path in ("mnist_sample.npz", "/home/xilinx/jupyter_notebooks/mnist_sample.npz"):
+    candidates = [
+        DEFAULT_SAMPLE,
+        Path("mnist_sample.npz"),
+        Path("/home/xilinx/jupyter_notebooks/mnist_sample.npz"),
+    ]
+    for path in candidates:
         try:
             data = np.load(path)
-            imgs = data["images"][:n].astype(np.float64)
+            imgs = data["images"].astype(np.float64)
+            labs = data["labels"].astype(int)
             if imgs.max() > 1.5:
                 imgs = imgs / 255.0
-            labs = data["labels"][:n].astype(int)
-            print(f"loaded MNIST sample from {path}")
+            if len(labs) > n:
+                idx = rng.choice(len(labs), size=n, replace=False)
+                imgs, labs = imgs[idx], labs[idx]
+            else:
+                imgs, labs = imgs[:n], labs[:n]
+            print(f"loaded MNIST sample from {path} (n={len(labs)})")
             return imgs, labs
         except (FileNotFoundError, OSError, KeyError):
             pass
@@ -122,7 +159,7 @@ def load_or_synth_batch(
     imgs = np.stack([synthetic_digit(rng, int(lbl)) for lbl in labels], axis=0)
     print(
         f"using synthetic digits (n={n}); "
-        "drop mnist_sample.npz beside script for real samples"
+        "run host/train_vit_mnist.py to create mnist_sample.npz"
     )
     return imgs, labels
 
@@ -203,15 +240,29 @@ def run_vit_smoke(
     seed: int = 0,
     n: int = 2,
     verbose: bool = False,
+    weights_path: str | Path | None | bool = None,
 ) -> int:
     rng = np.random.default_rng(seed)
-    w = VitMnistWeights.make(rng)
+    # weights_path=False → force random; None → auto-load default npz if present
+    if weights_path is False:
+        w = VitMnistWeights.make(rng)
+        wsrc = "random-seeded"
+    else:
+        path = weights_path
+        if path is None and DEFAULT_WEIGHTS.exists():
+            path = DEFAULT_WEIGHTS
+        if path is not None:
+            w = VitMnistWeights.load(path)
+            wsrc = str(path)
+        else:
+            w = VitMnistWeights.make(rng)
+            wsrc = "random-seeded"
     imgs, labels = load_or_synth_batch(n=n, seed=seed + 1)
 
     print("=== MNIST tiny-ViT smoke ===")
     print(f"IMG={IMG} PATCH={PATCH} T={VIT_T} D={VIT_D} classes={N_CLASS}")
     print(f"scales ACT/W/P={nt.SCALE_ACT}/{nt.SCALE_W}/{nt.SCALE_P}")
-    print(f"weights seeded; labels={list(map(int, labels))} (accuracy not expected yet)")
+    print(f"weights={wsrc}")
 
     glue = mmio = transport = None
     if bit_path is not None:
@@ -228,13 +279,15 @@ def run_vit_smoke(
         glue = nt.GlueDevice(mmio)
 
     ok = True
+    n_correct_ref = 0
+    n_correct_hw = 0
     for i in range(n):
         print(f"\n--- image[{i}] label={int(labels[i])} ---")
         print("--- ref ---")
         logits_ref, dump_ref = vit_forward(imgs[i], w, use_hw=False, verbose=verbose)
-        print(
-            f"ref pred={int(dump_ref['pred'][0])} logits_q12[:4]={logits_ref[:4].tolist()}"
-        )
+        pred_ref = int(dump_ref["pred"][0])
+        n_correct_ref += int(pred_ref == int(labels[i]))
+        print(f"ref pred={pred_ref} logits_q12[:4]={logits_ref[:4].tolist()}")
 
         if bit_path is None:
             continue
@@ -249,9 +302,9 @@ def run_vit_smoke(
             use_hw=True,
             verbose=verbose,
         )
-        print(
-            f"hw  pred={int(dump_hw['pred'][0])} logits_q12[:4]={logits_hw[:4].tolist()}"
-        )
+        pred_hw = int(dump_hw["pred"][0])
+        n_correct_hw += int(pred_hw == int(labels[i]))
+        print(f"hw  pred={pred_hw} logits_q12[:4]={logits_hw[:4].tolist()}")
 
         for key, tol in (
             ("tokens", 512),
@@ -269,8 +322,18 @@ def run_vit_smoke(
             ok &= passed
             print(f"{key}: {'PASS' if passed else 'FAIL'}  max|err|={err}  tol={tol}")
 
+    print(
+        f"\nref accuracy on this batch: {n_correct_ref}/{n} "
+        f"({100.0 * n_correct_ref / max(n, 1):.1f}%)"
+    )
+    if bit_path is not None:
+        print(
+            f"hw  accuracy on this batch: {n_correct_hw}/{n} "
+            f"({100.0 * n_correct_hw / max(n, 1):.1f}%)"
+        )
+
     if bit_path is None:
-        print("\nVIT REF-ONLY PASS (plumbing + synthetic/real sample path)")
+        print("\nVIT REF-ONLY PASS")
         return 0
 
     print("\nALL VIT PASS" if ok else "\nVIT FAIL")
@@ -284,14 +347,30 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("-n", type=int, default=2, help="images to run")
     p.add_argument("--verbose", action="store_true")
+    p.add_argument(
+        "--weights",
+        default=None,
+        help="path to vit_mnist_weights.npz (default: auto if present)",
+    )
+    p.add_argument("--random-weights", action="store_true", help="ignore saved weights")
     args = p.parse_args(list(sys.argv[1:] if argv is None else argv))
 
+    weights: str | Path | None | bool
+    weights = False if args.random_weights else args.weights
     if args.ref_only or not args.bit:
         return run_vit_smoke(
-            bit_path=None, seed=args.seed, n=args.n, verbose=args.verbose
+            bit_path=None,
+            seed=args.seed,
+            n=args.n,
+            verbose=args.verbose,
+            weights_path=weights,
         )
     return run_vit_smoke(
-        bit_path=args.bit, seed=args.seed, n=args.n, verbose=args.verbose
+        bit_path=args.bit,
+        seed=args.seed,
+        n=args.n,
+        verbose=args.verbose,
+        weights_path=weights,
     )
 
 

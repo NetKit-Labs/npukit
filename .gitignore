@@ -24,6 +24,9 @@ viz/.venv/
 viz/__pycache__/
 *.pyc
 
+# MNIST download cache (weights/samples under host/ are tracked)
+host/data/
+
 # Editor / OS
 .DS_Store
 *~

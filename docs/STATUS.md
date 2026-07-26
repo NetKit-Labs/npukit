@@ -42,12 +42,12 @@ Icarus sims under `sim/` remain host-side RTL checks; they are separate from the
 
 ## Next path
 
-1. **MNIST tiny-ViT (host)** — `host/npukit_vit_mnist.py` / `.ipynb`
-   - Geometry: 28→16 resize, patch 4 → 16 raw patches, pair-average → **T=8**, **D=8**
-   - FPGA: patch GEMM + 1-layer block; CPU: pool + 10-way head (not 8-aligned)
-   - Seeded random weights first (plumbing); trained weights / real MNIST samples later
-   - Note: glue `len==16` was truncated to 0 in RTL (`len[IDX_W-1:0]`); fix is in `rtl/npukit_glue.sv` — rebuild bit before using T=16 Softmax
-2. Grow sequence/dim via **host tiling** first; only raise glue `MAX_LEN` if a single vector must exceed 16.
-3. **Defer** PE-grid growth, ping-pong SRAM, depthwise engines until the model path works.
+1. **MNIST tiny-ViT (host)** — stay **T=8** / 28→16 resize for now
+   - `host/train_vit_mnist.py` → `vit_mnist_weights.npz` + `mnist_sample.npz`
+   - Float test ~**81%**; quantized CPU/FPGA path ~**40%** on a 512-img slice (Q12/LUT gap — improve QAT next)
+   - Board smoke: ref vs HW numeric match + batch accuracy
+   - Glue `len==16` RTL fix is in-tree; rebuild before T=16 Softmax
+2. **Next:** better quant-aware training / scale calibration to close float↔int8 accuracy gap
+3. **Defer:** T=16 geometry, PE-grid growth, ping-pong, depthwise
 
 Related docs: [`transformer_split.md`](transformer_split.md), [`transformer_glue.md`](transformer_glue.md), [`glue_bringup.md`](glue_bringup.md), [`tiling.md`](tiling.md), [`../PLAN.md`](../PLAN.md).

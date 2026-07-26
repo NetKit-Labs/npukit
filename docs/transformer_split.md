@@ -109,6 +109,7 @@ every tiny row in Python if we do not want it to.
 | GEMM tiles | `host/npukit_matmul.py` |
 | Glue ops + ref / e2e block | `host/npukit_transformer.py` |
 | MNIST tiny-ViT host smoke | `host/npukit_vit_mnist.py` |
+| Train + export ViT weights | `host/train_vit_mnist.py` |
 | Interactive GEMM | `host/npukit_matmul.ipynb` |
 
 CPU-only helpers already sketched in the transformer host: RoPE, attention
