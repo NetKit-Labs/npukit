@@ -365,7 +365,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("bit", nargs="?", help="path to npukit.bit (omit with --ref-only)")
     p.add_argument("--ref-only", action="store_true")
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("-n", type=int, default=2, help="images to run")
+    p.add_argument("-n", type=int, default=64, help="images to run (full mnist_sample.npz)")
     p.add_argument("--verbose", action="store_true")
     p.add_argument(
         "--weights",
