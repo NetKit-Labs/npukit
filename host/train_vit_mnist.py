@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Train tiny-ViT for NpuKit with scale calibration + STE QAT.
+"""Train tiny-ViT for NpuKit with scale calibration + deploy-faithful STE QAT.
 
 Geometry: native 28×28, patch 7 → T=16, patch vec 49→pad56, D=16,
 N_LAYERS host-scheduled transformer blocks, 10 classes.
@@ -8,9 +8,10 @@ Uses full MNIST train (60k) plus light shift augmentation.
 Pipeline:
   1) Float warm-up
   2) Calibrate per-stage scales (embed / each block / cls)
-  3) QAT with fake-int8 matmuls + Q12 grid snap (STE)
-  4) Export int8/Q12 weights + calibrated scales
-  5) Report numpy quantized-path accuracy (same as board ref)
+  3) QAT: fake-int8 matmuls + Q12 snap (proxy)
+  4) Deploy-faithful fine-tune: CE on board-ref numpy logits, STE grads via proxy
+  5) Export int8/Q12 weights + calibrated scales
+  6) Report numpy quantized-path accuracy (full test set by default)
 
 Usage:
   python3 host/train_vit_mnist.py
@@ -215,6 +216,8 @@ class TinyViT(nn.Module):
         *,
         qat: bool,
     ) -> torch.Tensor:
+        # Differentiable path keeps float Softmax/RMSNorm/GELU; deploy match is
+        # applied at logits via forward STE (see forward(deploy_faithful=True)).
         xn = TransformerBlock.rmsnorm(x, blk.gamma1)
         if qat:
             xn = fake_q12(xn)
@@ -228,8 +231,7 @@ class TinyViT(nn.Module):
         if qat:
             q_s = fake_quant(q, sc.act)
             k_s = fake_quant(k, sc.act)
-            scores = (q_s @ k_s.transpose(-1, -2)) * scale
-            scores = fake_q12(scores)
+            scores = fake_q12((q_s @ k_s.transpose(-1, -2)) * scale)
         else:
             scores = (q @ k.transpose(-1, -2)) * scale
         attn = torch.softmax(scores, dim=-1)
@@ -254,7 +256,7 @@ class TinyViT(nn.Module):
             x = fake_q12(x)
         return x
 
-    def forward(self, imgs28: torch.Tensor, *, qat: bool = False) -> torch.Tensor:
+    def _forward_proxy(self, imgs28: torch.Tensor, *, qat: bool) -> torch.Tensor:
         tok = preprocess_batch(imgs28)
         if qat:
             tok = fake_q12(tok)
@@ -279,6 +281,21 @@ class TinyViT(nn.Module):
             scale_act=self.scale_cls.act,
             scale_w=self.scale_cls.w,
         )
+
+    def forward(
+        self,
+        imgs28: torch.Tensor,
+        *,
+        qat: bool = False,
+        deploy_faithful: bool = False,
+    ) -> torch.Tensor:
+        logits = self._forward_proxy(imgs28, qat=qat)
+        if not (qat and deploy_faithful):
+            return logits
+        # Forward value = board-ref numpy path; grads flow through proxy (STE).
+        with torch.no_grad():
+            dep = deploy_numpy_logits(self, imgs28)
+        return logits + (dep - logits).detach()
 
 
 def _scale_from_max(a_max: float, *, lo: float, hi: float) -> float:
@@ -390,6 +407,46 @@ def _quant_weight(w: torch.Tensor, scale_w: float) -> np.ndarray:
     return nt.quant_weight_to_i8(w.detach().cpu().numpy(), scale=scale_w)
 
 
+def model_to_weights(model: TinyViT) -> vit.VitMnistWeights:
+    """Snapshot float params → int8/Q12 VitMnistWeights (board-ref layout)."""
+    blocks = []
+    for blk, sc in zip(model.blocks, model.scale_blocks):
+        blocks.append(
+            nt.TinyBlockWeights(
+                wq=_quant_weight(blk.wq, sc.w),
+                wk=_quant_weight(blk.wk, sc.w),
+                wv=_quant_weight(blk.wv, sc.w),
+                wo=_quant_weight(blk.wo, sc.w),
+                w1=_quant_weight(blk.w1, sc.w),
+                w2=_quant_weight(blk.w2, sc.w),
+                gamma1=nt.to_q12(blk.gamma1.detach().cpu().numpy()),
+                gamma2=nt.to_q12(blk.gamma2.detach().cpu().numpy()),
+            )
+        )
+    return vit.VitMnistWeights(
+        w_pe=_quant_weight(model.w_pe, model.scale_embed.w),
+        pos=nt.to_q12(model.pos.detach().cpu().numpy()),
+        blocks=tuple(blocks),
+        w_cls=_quant_weight(model.w_cls, model.scale_cls.w),
+        scale_embed=model.scale_embed,
+        scale_blocks=tuple(model.scale_blocks),
+        scale_cls=model.scale_cls,
+    )
+
+
+@torch.no_grad()
+def deploy_numpy_logits(model: TinyViT, imgs28: torch.Tensor) -> torch.Tensor:
+    """Board-ref numpy forward for a batch → float logits [B,10]."""
+    w = model_to_weights(model)
+    imgs = imgs28.detach().cpu().numpy().astype(np.float64)
+    outs = []
+    for i in range(imgs.shape[0]):
+        logits_q12, _ = vit.vit_forward(imgs[i], w, use_hw=False, verbose=False)
+        outs.append(nt.from_q12(logits_q12))
+    arr = np.stack(outs, axis=0).astype(np.float32)
+    return torch.from_numpy(arr).to(device=imgs28.device, dtype=imgs28.dtype)
+
+
 def export_weights(model: TinyViT) -> None:
     payload: dict[str, np.ndarray] = {
         "w_pe": _quant_weight(model.w_pe, model.scale_embed.w),
@@ -439,24 +496,44 @@ def save_sample(x_te: np.ndarray, y_te: np.ndarray, n: int = 64, seed: int = 0) 
 
 
 @torch.no_grad()
-def accuracy(model: TinyViT, loader: DataLoader, device: torch.device, *, qat: bool) -> float:
+def accuracy(
+    model: TinyViT,
+    loader: DataLoader,
+    device: torch.device,
+    *,
+    qat: bool,
+    deploy_faithful: bool = False,
+) -> float:
     model.eval()
     correct = total = 0
     for xb, yb in loader:
         xb = xb.to(device)
         yb = yb.to(device)
-        pred = model(xb, qat=qat).argmax(dim=-1)
+        pred = model(xb, qat=qat, deploy_faithful=deploy_faithful).argmax(dim=-1)
         correct += int((pred == yb).sum().item())
         total += int(yb.numel())
     return correct / max(total, 1)
 
 
-def quant_numpy_accuracy(x_te: np.ndarray, y_te: np.ndarray, n_eval: int) -> float:
+def quant_numpy_accuracy(
+    x_te: np.ndarray,
+    y_te: np.ndarray,
+    n_eval: int,
+    *,
+    log_every: int = 1000,
+) -> float:
+    """Board-ref path accuracy on first n_eval test images (n_eval<=0 → all)."""
     w = vit.VitMnistWeights.load(WEIGHTS_PATH)
+    n_eval = len(y_te) if n_eval <= 0 else min(n_eval, len(y_te))
     correct = 0
     for i in range(n_eval):
         _, dump = vit.vit_forward(x_te[i], w, use_hw=False, verbose=False)
         correct += int(dump["pred"][0] == y_te[i])
+        if log_every and (i + 1) % log_every == 0:
+            print(
+                f"  numpy eval {i + 1}/{n_eval}  "
+                f"running_acc={100.0 * correct / (i + 1):.2f}%"
+            )
     return correct / max(n_eval, 1)
 
 
@@ -479,7 +556,15 @@ def train(args: argparse.Namespace) -> int:
     torch.manual_seed(args.seed)
     model = TinyViT().to(device)
 
-    def run_epochs(tag: str, n_epochs: int, *, qat: bool, lr: float) -> None:
+    def run_epochs(
+        tag: str,
+        n_epochs: int,
+        *,
+        qat: bool,
+        lr: float,
+        deploy_faithful: bool = False,
+        eval_deploy: bool = False,
+    ) -> None:
         opt = torch.optim.Adam(model.parameters(), lr=lr)
         for epoch in range(1, n_epochs + 1):
             model.train()
@@ -491,13 +576,19 @@ def train(args: argparse.Namespace) -> int:
                 if args.augment:
                     xb = augment_batch(xb, max_shift=args.aug_shift)
                 opt.zero_grad(set_to_none=True)
-                logits = model(xb, qat=qat)
+                logits = model(xb, qat=qat, deploy_faithful=deploy_faithful)
                 loss = F.cross_entropy(logits, yb)
                 loss.backward()
                 opt.step()
                 total_loss += float(loss.item()) * int(yb.numel())
                 n += int(yb.numel())
-            te_acc = accuracy(model, te_loader, device, qat=qat)
+            te_acc = accuracy(
+                model,
+                te_loader,
+                device,
+                qat=qat,
+                deploy_faithful=eval_deploy,
+            )
             print(
                 f"{tag} epoch {epoch:02d}  loss={total_loss / max(n, 1):.4f}  "
                 f"test_acc={te_acc * 100:.2f}%  "
@@ -507,20 +598,30 @@ def train(args: argparse.Namespace) -> int:
 
     print(
         f"train tiny-ViT T={vit.VIT_T} D={vit.VIT_D} L={vit.N_LAYERS} "
-        f"float={args.epochs} qat={args.qat_epochs} train_n={len(y_tr)} "
-        f"aug={args.augment}/{args.aug_shift} device={device}"
+        f"float={args.epochs} qat={args.qat_epochs} deploy_ft={args.deploy_epochs} "
+        f"train_n={len(y_tr)} aug={args.augment}/{args.aug_shift} device={device}"
     )
     run_epochs("float", args.epochs, qat=False, lr=args.lr)
     calibrate_scales(model, cal_loader, device, batches=args.cal_batches)
     if args.qat_epochs > 0:
         run_epochs("qat", args.qat_epochs, qat=True, lr=args.lr * args.qat_lr_mult)
-        # Keep scales fixed after the main QAT pass. A second recalibrate on a
-        # deeper (2-layer) net shifted ranges without adapting weights and
-        # hurt the numpy/FPGA quantized path.
+    if args.deploy_epochs > 0:
+        # Fine-tune so CE sees board-ref numpy logits (STE grads via proxy QAT).
+        if args.qat_batch > 0 and args.qat_batch != args.batch:
+            tr_loader = DataLoader(tr_ds, batch_size=args.qat_batch, shuffle=True)
+        run_epochs(
+            "deploy",
+            args.deploy_epochs,
+            qat=True,
+            lr=args.lr * args.qat_lr_mult * args.deploy_lr_mult,
+            deploy_faithful=True,
+            eval_deploy=False,  # proxy acc; numpy full eval at end
+        )
 
     export_weights(model)
-    n_eval = min(args.eval_n, len(y_te))
-    qacc = quant_numpy_accuracy(x_te, y_te, n_eval)
+    n_eval = len(y_te) if args.eval_n <= 0 else min(args.eval_n, len(y_te))
+    print(f"numpy quantized eval on {n_eval} test images (board-ref path)...")
+    qacc = quant_numpy_accuracy(x_te, y_te, n_eval if args.eval_n > 0 else 0)
     facc = accuracy(model, te_loader, device, qat=False)
     qat_acc = accuracy(model, te_loader, device, qat=True)
     print(f"float test accuracy (full):     {100 * facc:.2f}%")
@@ -535,7 +636,30 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--qat-epochs", type=int, default=12)
     p.add_argument("--qat-lr-mult", type=float, default=0.25)
     p.add_argument("--cal-batches", type=int, default=30)
-    p.add_argument("--eval-n", type=int, default=2048)
+    p.add_argument(
+        "--eval-n",
+        type=int,
+        default=0,
+        help="numpy eval images; 0 = full test set (10000)",
+    )
+    p.add_argument(
+        "--qat-batch",
+        type=int,
+        default=32,
+        help="batch size during deploy-faithful fine-tune (0 = use --batch)",
+    )
+    p.add_argument(
+        "--deploy-epochs",
+        type=int,
+        default=6,
+        help="extra epochs with board-ref numpy logits STE",
+    )
+    p.add_argument(
+        "--deploy-lr-mult",
+        type=float,
+        default=0.5,
+        help="LR multiplier on top of qat-lr during deploy fine-tune",
+    )
     p.add_argument("--batch", type=int, default=128)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--subset", type=int, default=0, help="0 = full train set (60k)")

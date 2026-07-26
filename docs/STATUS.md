@@ -1,6 +1,6 @@
 # NpuKit status
 
-Checkpoint after MNIST tiny-ViT **T=16 × D=16 × L=2** + per-stage quant scales (2026-07-26).
+Checkpoint after deploy-faithful QAT (T=16 × D=16 × L=2, per-stage scales) (2026-07-26).
 
 ## Where we are
 
@@ -67,8 +67,8 @@ Example calibrated scales (order-of-magnitude; see npz): embed act/w ≈ 72/336,
 
 ## Next path
 
-1. **Per-head scales** when multi-head attention is added
-2. Optional CNN stem / longer QAT if chasing higher MNIST label accuracy
+1. Optional longer deploy-FT / host CNN stem if chasing higher MNIST labels
+2. **Per-head scales** when multi-head attention is added
 3. **Defer:** PE-grid growth, ping-pong, depthwise, RTL wider than D=16
 
 Related docs: [`transformer_split.md`](transformer_split.md), [`transformer_glue.md`](transformer_glue.md), [`glue_bringup.md`](glue_bringup.md), [`tiling.md`](tiling.md), [`../PLAN.md`](../PLAN.md).
