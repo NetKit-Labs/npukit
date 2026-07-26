@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Train tiny-ViT for NpuKit with scale calibration + STE QAT.
 
-Geometry: native 28×28, patch 7 → T=16, patch vec 49→pad56, D=16, 10 classes.
+Geometry: native 28×28, patch 7 → T=16, patch vec 49→pad56, D=16,
+N_LAYERS host-scheduled transformer blocks, 10 classes.
 Uses full MNIST train (60k) plus light shift augmentation.
 
 Pipeline:
@@ -143,15 +144,11 @@ def preprocess_batch(imgs28: torch.Tensor) -> torch.Tensor:
     return out
 
 
-class TinyViT(nn.Module):
-    """Float / QAT twin of host ViT plumbing."""
+class TransformerBlock(nn.Module):
+    """One pre-norm attn + FFN block (matches host transformer_block_1layer)."""
 
-    def __init__(self) -> None:
+    def __init__(self, d: int) -> None:
         super().__init__()
-        d = vit.VIT_D
-        t = vit.VIT_T
-        self.w_pe = nn.Parameter(torch.randn(vit.PATCH_DIM, d) * 0.12)
-        self.pos = nn.Parameter(torch.zeros(t, d))
         self.wq = nn.Parameter(torch.randn(d, d) * 0.12)
         self.wk = nn.Parameter(torch.randn(d, d) * 0.12)
         self.wv = nn.Parameter(torch.randn(d, d) * 0.12)
@@ -160,16 +157,27 @@ class TinyViT(nn.Module):
         self.w2 = nn.Parameter(torch.randn(d, d) * 0.12)
         self.gamma1 = nn.Parameter(torch.ones(d))
         self.gamma2 = nn.Parameter(torch.ones(d))
-        self.w_cls = nn.Parameter(torch.randn(d, vit.N_CLASS) * 0.12)
-        # runtime scales (not Parameters — set by calibration)
-        self.scale_act = float(nt.SCALE_ACT)
-        self.scale_w = float(nt.SCALE_W)
-        self.scale_p = float(nt.SCALE_P)
 
     @staticmethod
     def rmsnorm(x: torch.Tensor, gamma: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
         rms = torch.sqrt(torch.mean(x * x, dim=-1, keepdim=True) + eps)
         return (x / rms) * gamma
+
+
+class TinyViT(nn.Module):
+    """Float / QAT twin of host ViT plumbing (N_LAYERS host-scheduled blocks)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        d = vit.VIT_D
+        t = vit.VIT_T
+        self.w_pe = nn.Parameter(torch.randn(vit.PATCH_DIM, d) * 0.12)
+        self.pos = nn.Parameter(torch.zeros(t, d))
+        self.blocks = nn.ModuleList(TransformerBlock(d) for _ in range(vit.N_LAYERS))
+        self.w_cls = nn.Parameter(torch.randn(d, vit.N_CLASS) * 0.12)
+        self.scale_act = float(nt.SCALE_ACT)
+        self.scale_w = float(nt.SCALE_W)
+        self.scale_p = float(nt.SCALE_P)
 
     def _linear(self, x: torch.Tensor, w: torch.Tensor, *, qat: bool) -> torch.Tensor:
         if not qat:
@@ -178,20 +186,13 @@ class TinyViT(nn.Module):
         wq = fake_quant(w, self.scale_w)
         return xq @ wq
 
-    def forward(self, imgs28: torch.Tensor, *, qat: bool = False) -> torch.Tensor:
-        tok = preprocess_batch(imgs28)
-        if qat:
-            tok = fake_q12(tok)
-        x = self._linear(tok, self.w_pe, qat=qat) + self.pos
-        if qat:
-            x = fake_q12(x)
-
-        xn = self.rmsnorm(x, self.gamma1)
+    def _block(self, x: torch.Tensor, blk: TransformerBlock, *, qat: bool) -> torch.Tensor:
+        xn = TransformerBlock.rmsnorm(x, blk.gamma1)
         if qat:
             xn = fake_q12(xn)
-        q = self._linear(xn, self.wq, qat=qat)
-        k = self._linear(xn, self.wk, qat=qat)
-        v = self._linear(xn, self.wv, qat=qat)
+        q = self._linear(xn, blk.wq, qat=qat)
+        k = self._linear(xn, blk.wk, qat=qat)
+        v = self._linear(xn, blk.wv, qat=qat)
         if qat:
             q, k, v = fake_q12(q), fake_q12(k), fake_q12(v)
 
@@ -207,24 +208,33 @@ class TinyViT(nn.Module):
         if qat:
             attn_q = fake_quant(attn, self.scale_p, qmin=0.0, qmax=127.0)
             v_q = fake_quant(v, self.scale_act)
-            ctx = attn_q @ v_q
-            ctx = fake_q12(ctx)
+            ctx = fake_q12(attn_q @ v_q)
         else:
             ctx = attn @ v
-        x = x + self._linear(ctx, self.wo, qat=qat)
+        x = x + self._linear(ctx, blk.wo, qat=qat)
         if qat:
             x = fake_q12(x)
 
-        xn = self.rmsnorm(x, self.gamma2)
+        xn = TransformerBlock.rmsnorm(x, blk.gamma2)
         if qat:
             xn = fake_q12(xn)
-        h = F.gelu(self._linear(xn, self.w1, qat=qat))
+        h = F.gelu(self._linear(xn, blk.w1, qat=qat))
         if qat:
             h = fake_q12(h)
-        x = x + self._linear(h, self.w2, qat=qat)
+        x = x + self._linear(h, blk.w2, qat=qat)
         if qat:
             x = fake_q12(x)
+        return x
 
+    def forward(self, imgs28: torch.Tensor, *, qat: bool = False) -> torch.Tensor:
+        tok = preprocess_batch(imgs28)
+        if qat:
+            tok = fake_q12(tok)
+        x = self._linear(tok, self.w_pe, qat=qat) + self.pos
+        if qat:
+            x = fake_q12(x)
+        for blk in self.blocks:
+            x = self._block(x, blk, qat=qat)
         pooled = x.mean(dim=1)
         if qat:
             pooled = fake_q12(pooled)
@@ -257,30 +267,33 @@ def calibrate_scales(
         act_abs.append(tok.detach().abs().reshape(-1))
         act_abs.append(x.detach().abs().reshape(-1))
 
-        xn = TinyViT.rmsnorm(x, model.gamma1)
-        q = xn @ model.wq
-        k = xn @ model.wk
-        v = xn @ model.wv
-        act_abs.append(xn.detach().abs().reshape(-1))
-        act_abs.append(q.detach().abs().reshape(-1))
-        act_abs.append(k.detach().abs().reshape(-1))
-        act_abs.append(v.detach().abs().reshape(-1))
+        for blk in model.blocks:
+            xn = TransformerBlock.rmsnorm(x, blk.gamma1)
+            q = xn @ blk.wq
+            k = xn @ blk.wk
+            v = xn @ blk.wv
+            act_abs.append(xn.detach().abs().reshape(-1))
+            act_abs.append(q.detach().abs().reshape(-1))
+            act_abs.append(k.detach().abs().reshape(-1))
+            act_abs.append(v.detach().abs().reshape(-1))
 
-        scale = 1.0 / (vit.VIT_D**0.5)
-        scores = (q @ k.transpose(-1, -2)) * scale
-        score_abs.append(scores.detach().abs().reshape(-1))
-        attn = torch.softmax(scores, dim=-1)
-        attn_abs.append(attn.detach().reshape(-1))
-        ctx = attn @ v
-        act_abs.append(ctx.detach().abs().reshape(-1))
-        x = x + ctx @ model.wo
-        act_abs.append(x.detach().abs().reshape(-1))
+            scale = 1.0 / (vit.VIT_D**0.5)
+            scores = (q @ k.transpose(-1, -2)) * scale
+            score_abs.append(scores.detach().abs().reshape(-1))
+            attn = torch.softmax(scores, dim=-1)
+            attn_abs.append(attn.detach().reshape(-1))
+            ctx = attn @ v
+            act_abs.append(ctx.detach().abs().reshape(-1))
+            x = x + ctx @ blk.wo
+            act_abs.append(x.detach().abs().reshape(-1))
 
-        xn = TinyViT.rmsnorm(x, model.gamma2)
-        h = F.gelu(xn @ model.w1)
-        act_abs.append(xn.detach().abs().reshape(-1))
-        act_abs.append(h.detach().abs().reshape(-1))
-        x = x + h @ model.w2
+            xn = TransformerBlock.rmsnorm(x, blk.gamma2)
+            h = F.gelu(xn @ blk.w1)
+            act_abs.append(xn.detach().abs().reshape(-1))
+            act_abs.append(h.detach().abs().reshape(-1))
+            x = x + h @ blk.w2
+            act_abs.append(x.detach().abs().reshape(-1))
+
         pooled = x.mean(dim=1)
         act_abs.append(pooled.detach().abs().reshape(-1))
 
@@ -290,20 +303,25 @@ def calibrate_scales(
 
     def pct_max(chunks: list[torch.Tensor]) -> float:
         v = torch.cat(chunks).float()
+        # torch.quantile has a size cap; subsample large activation dumps
+        if v.numel() > 2_000_000:
+            idx = torch.randint(0, v.numel(), (2_000_000,), device=v.device)
+            v = v.view(-1)[idx]
         return float(torch.quantile(v, pct / 100.0).item())
 
     a_max = max(pct_max(act_abs), 1e-3)
-    # weights
-    w_chunks = [
-        model.w_pe.detach().abs().reshape(-1),
-        model.wq.detach().abs().reshape(-1),
-        model.wk.detach().abs().reshape(-1),
-        model.wv.detach().abs().reshape(-1),
-        model.wo.detach().abs().reshape(-1),
-        model.w1.detach().abs().reshape(-1),
-        model.w2.detach().abs().reshape(-1),
-        model.w_cls.detach().abs().reshape(-1),
-    ]
+    w_chunks = [model.w_pe.detach().abs().reshape(-1), model.w_cls.detach().abs().reshape(-1)]
+    for blk in model.blocks:
+        w_chunks.extend(
+            [
+                blk.wq.detach().abs().reshape(-1),
+                blk.wk.detach().abs().reshape(-1),
+                blk.wv.detach().abs().reshape(-1),
+                blk.wo.detach().abs().reshape(-1),
+                blk.w1.detach().abs().reshape(-1),
+                blk.w2.detach().abs().reshape(-1),
+            ]
+        )
     w_max = max(pct_max(w_chunks), 1e-3)
     p_max = max(pct_max(attn_abs), 1e-3)
 
@@ -332,36 +350,31 @@ def _quant_weight(w: torch.Tensor, scale_w: float) -> np.ndarray:
 
 def export_weights(model: TinyViT) -> None:
     sa, sw, sp = model.scale_act, model.scale_w, model.scale_p
-    block = nt.TinyBlockWeights(
-        wq=_quant_weight(model.wq, sw),
-        wk=_quant_weight(model.wk, sw),
-        wv=_quant_weight(model.wv, sw),
-        wo=_quant_weight(model.wo, sw),
-        w1=_quant_weight(model.w1, sw),
-        w2=_quant_weight(model.w2, sw),
-        gamma1=nt.to_q12(model.gamma1.detach().cpu().numpy()),
-        gamma2=nt.to_q12(model.gamma2.detach().cpu().numpy()),
+    payload: dict[str, np.ndarray] = {
+        "w_pe": _quant_weight(model.w_pe, sw),
+        "pos": nt.to_q12(model.pos.detach().cpu().numpy()),
+        "w_cls": _quant_weight(model.w_cls, sw),
+        "meta_t": np.array([vit.VIT_T]),
+        "meta_d": np.array([vit.VIT_D]),
+        "meta_layers": np.array([vit.N_LAYERS]),
+        "scale_act": np.array([sa], dtype=np.float64),
+        "scale_w": np.array([sw], dtype=np.float64),
+        "scale_p": np.array([sp], dtype=np.float64),
+    }
+    for i, blk in enumerate(model.blocks):
+        payload[f"wq{i}"] = _quant_weight(blk.wq, sw)
+        payload[f"wk{i}"] = _quant_weight(blk.wk, sw)
+        payload[f"wv{i}"] = _quant_weight(blk.wv, sw)
+        payload[f"wo{i}"] = _quant_weight(blk.wo, sw)
+        payload[f"w1{i}"] = _quant_weight(blk.w1, sw)
+        payload[f"w2{i}"] = _quant_weight(blk.w2, sw)
+        payload[f"gamma1{i}"] = nt.to_q12(blk.gamma1.detach().cpu().numpy())
+        payload[f"gamma2{i}"] = nt.to_q12(blk.gamma2.detach().cpu().numpy())
+    np.savez_compressed(WEIGHTS_PATH, **payload)
+    print(
+        f"wrote {WEIGHTS_PATH}  layers={vit.N_LAYERS}  "
+        f"scales act/w/p={sa:.2f}/{sw:.2f}/{sp:.2f}"
     )
-    np.savez_compressed(
-        WEIGHTS_PATH,
-        w_pe=_quant_weight(model.w_pe, sw),
-        pos=nt.to_q12(model.pos.detach().cpu().numpy()),
-        wq=block.wq,
-        wk=block.wk,
-        wv=block.wv,
-        wo=block.wo,
-        w1=block.w1,
-        w2=block.w2,
-        gamma1=block.gamma1,
-        gamma2=block.gamma2,
-        w_cls=_quant_weight(model.w_cls, sw),
-        meta_t=np.array([vit.VIT_T]),
-        meta_d=np.array([vit.VIT_D]),
-        scale_act=np.array([sa], dtype=np.float64),
-        scale_w=np.array([sw], dtype=np.float64),
-        scale_p=np.array([sp], dtype=np.float64),
-    )
-    print(f"wrote {WEIGHTS_PATH}  scales act/w/p={sa:.2f}/{sw:.2f}/{sp:.2f}")
 
 
 def save_sample(x_te: np.ndarray, y_te: np.ndarray, n: int = 64, seed: int = 0) -> None:
@@ -438,7 +451,7 @@ def train(args: argparse.Namespace) -> int:
             )
 
     print(
-        f"train tiny-ViT T={vit.VIT_T} D={vit.VIT_D} "
+        f"train tiny-ViT T={vit.VIT_T} D={vit.VIT_D} L={vit.N_LAYERS} "
         f"float={args.epochs} qat={args.qat_epochs} train_n={len(y_tr)} "
         f"aug={args.augment}/{args.aug_shift} device={device}"
     )
@@ -446,8 +459,9 @@ def train(args: argparse.Namespace) -> int:
     calibrate_scales(model, cal_loader, device, batches=args.cal_batches)
     if args.qat_epochs > 0:
         run_epochs("qat", args.qat_epochs, qat=True, lr=args.lr * args.qat_lr_mult)
-        # re-calibrate lightly after QAT (weights moved)
-        calibrate_scales(model, cal_loader, device, batches=args.cal_batches)
+        # Keep scales fixed after the main QAT pass. A second recalibrate on a
+        # deeper (2-layer) net shifted ranges without adapting weights and
+        # hurt the numpy/FPGA quantized path.
 
     export_weights(model)
     n_eval = min(args.eval_n, len(y_te))
