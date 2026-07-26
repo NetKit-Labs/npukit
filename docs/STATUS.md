@@ -42,7 +42,11 @@ Icarus sims under `sim/` remain host-side RTL checks; they are separate from the
 
 ## Next path
 
-1. **MNIST tiny-ViT (host)** — real patches/weights, quant/dequant with fixed scales, drive existing GEMM + glue. RoPE / masks / reshape stay on the A9.
+1. **MNIST tiny-ViT (host)** — `host/npukit_vit_mnist.py` / `.ipynb`
+   - Geometry: 28→16 resize, patch 4 → 16 raw patches, pair-average → **T=8**, **D=8**
+   - FPGA: patch GEMM + 1-layer block; CPU: pool + 10-way head (not 8-aligned)
+   - Seeded random weights first (plumbing); trained weights / real MNIST samples later
+   - Note: glue `len==16` was truncated to 0 in RTL (`len[IDX_W-1:0]`); fix is in `rtl/npukit_glue.sv` — rebuild bit before using T=16 Softmax
 2. Grow sequence/dim via **host tiling** first; only raise glue `MAX_LEN` if a single vector must exceed 16.
 3. **Defer** PE-grid growth, ping-pong SRAM, depthwise engines until the model path works.
 

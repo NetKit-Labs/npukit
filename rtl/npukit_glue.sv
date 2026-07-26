@@ -262,10 +262,12 @@ module npukit_glue #(
                 ST_IDLE: begin
                     busy_r <= 1'b0;
                     if (start) begin
+                        // len_r is IDX_W+1 bits so it can hold MAX_LEN itself.
+                        // Using only len[IDX_W-1:0] truncated MAX_LEN=16 → 0.
                         if (len == 8'd0 || len > MAX_LEN[7:0])
                             len_r <= MAX_LEN[IDX_W:0];
                         else
-                            len_r <= {1'b0, len[IDX_W-1:0]};
+                            len_r <= len[IDX_W:0];
                         param_r <= param;
                         idx     <= '0;
                         acc64   <= '0;

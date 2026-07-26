@@ -107,7 +107,7 @@ CPU. The bring-up choice was **int32 Q12 banks + int32 MMIO** for a simple
 | VERSION | `0x00000300` |
 | FEATURES | bit0 GEMM, bit1 GLUE |
 | Ops | residual, GELU, RMSNorm, Softmax |
-| `MAX_LEN` | **16** (was 64; cut for mux timing) |
+| `MAX_LEN` | **16** (was 64; cut for mux timing). **Bugfix:** start used `len[IDX_W-1:0]`, so `len==16` became 0 — rebuild bit after pull before relying on length-16 Softmax. |
 | Clock | PS FCLK0 **100 MHz**, WNS ≈ **+1 ns** |
 | Board | residual / GELU / RMSNorm / Softmax + GEMM tile **PASS**; e2e T=8×D=8 **ALL E2E PASS** |
 | Host | `host/npukit_transformer.py`, `host/npukit_transformer_e2e.ipynb` |

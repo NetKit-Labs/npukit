@@ -22,7 +22,7 @@ Part of [NetKit Labs](https://github.com/NetKit-Labs) — companion direction to
 | yes | Transformer glue (`rtl/npukit_glue.sv`): residual / GELU / RMSNorm / Softmax — board PASS @ 100 MHz |
 | yes | Host `host/npukit_transformer.py` + `.ipynb` (glue + GEMM); RoPE / mask / reshape stay on A9 |
 | yes | E2E 1-layer smoke T=8×D=8 + fixed scales — `host/npukit_transformer_e2e.ipynb` (**ALL E2E PASS**) |
-| next | MNIST tiny-ViT host (real patches/weights); optional later: depthwise / ping-pong / larger glue `MAX_LEN` |
+| wip | MNIST tiny-ViT host (`host/npukit_vit_mnist.py`, T=8×D=8 plumbing); optional later: T=16 after glue-len rebuild / trained weights |
 
 Status write-up (results + next path): **[`docs/STATUS.md`](docs/STATUS.md)**.
 
@@ -159,7 +159,7 @@ python3 viz/systolic_anim.py          # Pillow GIF → viz/out/systolic_8x8.gif
 npukit/
   rtl/           pe, systolic_array, npukit_glue, npukit_axil, npukit_top, npukit_pl
   sim/           pe_tb, systolic_array_tb, npukit_axil_tb, npukit_glue_tb
-  host/          npukit_matmul.py/.ipynb, npukit_transformer.py/.ipynb, npukit_transformer_e2e.ipynb
+  host/          npukit_matmul.py/.ipynb, npukit_transformer.py/.ipynb, npukit_transformer_e2e.ipynb, npukit_vit_mnist.py/.ipynb
   docs/          STATUS.md, tiling.md, transformer_glue.md, transformer_split.md, glue_bringup.md
   viz/           animation scripts
   constraints/   pynq_z2.xdc (btn/led; clock from PS FCLK0)
