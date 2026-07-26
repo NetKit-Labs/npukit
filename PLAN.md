@@ -75,7 +75,7 @@ An int8 8×8 GEMM covers MLP/FC and 1×1 conv; standard conv can be lowered to G
 - GEMM + DMA + host tiling: **done** (board **12/12 PASS**; dumps in `host/npukit_matmul.ipynb`).
 - Transformer glue v0x300: **done** (100 MHz closed; board residual/GELU/RMSNorm/Softmax + GEMM PASS).
 - Synthetic 1-layer e2e T=8×D=8: **done** (**ALL E2E PASS** in `host/npukit_transformer_e2e.ipynb`).
-- MNIST tiny-ViT T=16×D=16×L=2 + per-stage scales: **done** (board **ALL VIT PASS**; see [`docs/STATUS.md`](docs/STATUS.md)).
+- MNIST tiny-ViT T=16×D=16×L=2 + per-stage scales + deploy-faithful QAT: **done** (numpy/full test **~94.3%**; board **ALL VIT PASS**; see [`docs/STATUS.md`](docs/STATUS.md)).
 - Rebuild with `../scripts/build_bitstream.sh npukit` (or in-repo `scripts/`) after RTL/BD changes.
 
 ### Z7020 size note

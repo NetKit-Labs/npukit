@@ -109,8 +109,8 @@ CPU. The bring-up choice was **int32 Q12 banks + int32 MMIO** for a simple
 | Ops | residual, GELU, RMSNorm, Softmax |
 | `MAX_LEN` | **16** (was 64; cut for mux timing). Glue `len==MAX_LEN` load fix is in the current bit; Softmax length 16 used by ViT. |
 | Clock | PS FCLK0 **100 MHz**, WNS ≈ **+0.83 ns** (latest rebuild) |
-| Board | residual / GELU / RMSNorm / Softmax + GEMM tile **PASS**; e2e T=8×D=8 **ALL E2E PASS**; ViT T=16×D=16×L=2 **ALL VIT PASS** |
-| Host | `host/npukit_transformer.py`, `host/npukit_transformer_e2e.ipynb`, `host/npukit_vit_mnist.py` |
+| Board | residual / GELU / RMSNorm / Softmax + GEMM tile **PASS**; e2e T=8×D=8 **ALL E2E PASS**; ViT T=16×D=16×L=2 deploy-faithful **ALL VIT PASS** (~94% numpy/full test) |
+| Host | `host/npukit_transformer.py`, `host/npukit_transformer_e2e.ipynb`, `host/npukit_vit_mnist.py`, `host/train_vit_mnist.py` |
 | Status | [`STATUS.md`](STATUS.md) |
 | Sync | prefer `GLUE_COUNT` (`0x024`), not sticky `STATUS[4]` alone |
 

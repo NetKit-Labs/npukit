@@ -10,7 +10,7 @@ Checkpoint after deploy-faithful QAT (T=16 × D=16 × L=2, per-stage scales) (20
 |-------|------|
 | 8×8 int8 systolic GEMM | Output-stationary; tiled MxKxN via host DMA/MMIO |
 | Transformer glue | Residual / GELU / RMSNorm / Softmax, `MAX_LEN=16`, 100 MHz |
-| Host (A9) | Orchestration, per-stage quant/scales, RoPE / masks / reshape |
+| Host (A9) | Orchestration, per-stage quant/scales, deploy-faithful train, RoPE / masks / reshape |
 
 Fabric clock: **PS FCLK0 @ 100 MHz**. Latest rebuild closed timing (**WNS ≈ +0.83 ns** post-route). Glue Softmax length **16** works on this bit (`len_r` holds `MAX_LEN`).
 

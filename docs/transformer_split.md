@@ -109,7 +109,7 @@ every tiny row in Python if we do not want it to.
 | GEMM tiles | `host/npukit_matmul.py` |
 | Glue ops + ref / e2e block | `host/npukit_transformer.py` |
 | MNIST tiny-ViT host smoke (T=16×D=16×L=2, per-stage scales) | `host/npukit_vit_mnist.py` |
-| Train + export ViT weights (QAT + per-stage calibration) | `host/train_vit_mnist.py` |
+| Train + export ViT (per-stage cal, proxy QAT, deploy-faithful FT) | `host/train_vit_mnist.py` |
 | Interactive GEMM | `host/npukit_matmul.ipynb` |
 | Interactive ViT | `host/npukit_vit_mnist.ipynb` |
 
