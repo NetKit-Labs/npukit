@@ -5,7 +5,7 @@ Geometry (T=16, no resize):
   - Native 28×28 MNIST
   - Patch size 7 → T=16 tokens (4×4 grid)
   - Patch vector 7×7=49 zero-padded to 56 (GEMM 8-alignment)
-  - Model dim D=8
+  - Model dim D=16 (glue MAX_LEN=16; GEMM host-tiles 8×8)
 
 Split:
   - CPU: patchify, pad, position add, mean-pool, class head (10-way; not 8-aligned)
@@ -36,13 +36,13 @@ DEFAULT_SAMPLE = _HOST_DIR / "mnist_sample.npz"
 IMG = 28
 PATCH = 7
 VIT_T = (IMG // PATCH) * (IMG // PATCH)  # 16
-VIT_D = 8
+VIT_D = 16
 PATCH_DIM_RAW = PATCH * PATCH  # 49
 PATCH_DIM = ((PATCH_DIM_RAW + 7) // 8) * 8  # 56 — pad for 8×8 GEMM tiles
 N_CLASS = 10
 
 assert VIT_T <= nt.MAX_LEN and VIT_T % 8 == 0
-assert VIT_D % 8 == 0 and PATCH_DIM % 8 == 0
+assert VIT_D <= nt.MAX_LEN and VIT_D % 8 == 0 and PATCH_DIM % 8 == 0
 
 
 @dataclass

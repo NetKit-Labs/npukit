@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Train tiny-ViT for NpuKit with scale calibration + STE QAT.
 
-Geometry: native 28×28, patch 7 → T=16, patch vec 49→pad56, D=8, 10 classes.
+Geometry: native 28×28, patch 7 → T=16, patch vec 49→pad56, D=16, 10 classes.
+Uses full MNIST train (60k) plus light shift augmentation.
 
 Pipeline:
   1) Float warm-up
@@ -103,6 +104,25 @@ def load_mnist() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     x_te = _read_idx_images(DATA_DIR / "t10k-images-idx3-ubyte.gz").astype(np.float32) / 255.0
     y_te = _read_idx_labels(DATA_DIR / "t10k-labels-idx1-ubyte.gz").astype(np.int64)
     return x_tr, y_tr, x_te, y_te
+
+
+def augment_batch(imgs28: torch.Tensor, *, max_shift: int = 2) -> torch.Tensor:
+    """Cheap MNIST aug: random integer translate (zero pad). Full 60k + shifts ≈ more data."""
+    if max_shift <= 0:
+        return imgs28
+    b, h, w = imgs28.shape
+    device = imgs28.device
+    out = torch.zeros_like(imgs28)
+    dy = torch.randint(-max_shift, max_shift + 1, (b,), device=device)
+    dx = torch.randint(-max_shift, max_shift + 1, (b,), device=device)
+    for i in range(b):
+        y0, x0 = int(dy[i]), int(dx[i])
+        src_y0, src_y1 = max(0, -y0), h - max(0, y0)
+        dst_y0, dst_y1 = max(0, y0), h - max(0, -y0)
+        src_x0, src_x1 = max(0, -x0), w - max(0, x0)
+        dst_x0, dst_x1 = max(0, x0), w - max(0, -x0)
+        out[i, dst_y0:dst_y1, dst_x0:dst_x1] = imgs28[i, src_y0:src_y1, src_x0:src_x1]
+    return out
 
 
 def preprocess_batch(imgs28: torch.Tensor) -> torch.Tensor:
@@ -401,6 +421,8 @@ def train(args: argparse.Namespace) -> int:
             for xb, yb in tr_loader:
                 xb = xb.to(device)
                 yb = yb.to(device)
+                if args.augment:
+                    xb = augment_batch(xb, max_shift=args.aug_shift)
                 opt.zero_grad(set_to_none=True)
                 logits = model(xb, qat=qat)
                 loss = F.cross_entropy(logits, yb)
@@ -417,7 +439,8 @@ def train(args: argparse.Namespace) -> int:
 
     print(
         f"train tiny-ViT T={vit.VIT_T} D={vit.VIT_D} "
-        f"float={args.epochs} qat={args.qat_epochs} train_n={len(y_tr)} device={device}"
+        f"float={args.epochs} qat={args.qat_epochs} train_n={len(y_tr)} "
+        f"aug={args.augment}/{args.aug_shift} device={device}"
     )
     run_epochs("float", args.epochs, qat=False, lr=args.lr)
     calibrate_scales(model, cal_loader, device, batches=args.cal_batches)
@@ -439,14 +462,16 @@ def train(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Train MNIST tiny-ViT for NpuKit (QAT)")
-    p.add_argument("--epochs", type=int, default=10)
-    p.add_argument("--qat-epochs", type=int, default=8)
+    p.add_argument("--epochs", type=int, default=20)
+    p.add_argument("--qat-epochs", type=int, default=12)
     p.add_argument("--qat-lr-mult", type=float, default=0.25)
-    p.add_argument("--cal-batches", type=int, default=20)
-    p.add_argument("--eval-n", type=int, default=1024)
+    p.add_argument("--cal-batches", type=int, default=30)
+    p.add_argument("--eval-n", type=int, default=2048)
     p.add_argument("--batch", type=int, default=128)
     p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--subset", type=int, default=0, help="0 = full train set")
+    p.add_argument("--subset", type=int, default=0, help="0 = full train set (60k)")
+    p.add_argument("--augment", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--aug-shift", type=int, default=2, help="max ±px translate")
     p.add_argument("--sample-n", type=int, default=64)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cpu")

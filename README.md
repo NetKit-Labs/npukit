@@ -22,7 +22,7 @@ Part of [NetKit Labs](https://github.com/NetKit-Labs) — companion direction to
 | yes | Transformer glue (`rtl/npukit_glue.sv`): residual / GELU / RMSNorm / Softmax — board PASS @ 100 MHz |
 | yes | Host `host/npukit_transformer.py` + `.ipynb` (glue + GEMM); RoPE / mask / reshape stay on A9 |
 | yes | E2E 1-layer smoke T=8×D=8 + fixed scales — `host/npukit_transformer_e2e.ipynb` (**ALL E2E PASS**) |
-| yes | MNIST tiny-ViT T=16 (`train_vit_mnist.py` QAT; float ~84%, quant ~81%, board **ALL VIT PASS** 51/64) |
+| yes | MNIST tiny-ViT T=16×D=16 (`train_vit_mnist.py` QAT+aug; float ~93%, quant ~90%, board **ALL VIT PASS**) |
 
 Status write-up (results + next path): **[`docs/STATUS.md`](docs/STATUS.md)**.
 
