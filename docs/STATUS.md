@@ -21,7 +21,7 @@ Fabric clock: **PS FCLK0 @ 100 MHz**. Latest rebuild closed timing (**WNS ≈ +0
 | `host/npukit_matmul.ipynb` | GEMM unit suite: classic 8×8 + tiled 16×16 / 32×32 | **12/12 PASS** |
 | `host/npukit_transformer.ipynb` | Glue unit ops + GEMM sanity on same bit | **ALL BOARD PASS** |
 | `host/npukit_transformer_e2e.ipynb` | Synthetic 1-layer block, T=8×D=8, fixed scales | **ALL E2E PASS** (ref + board) |
-| `host/npukit_vit_mnist.ipynb` | MNIST tiny-ViT T=16×D=16×L=2, per-stage QAT | **ALL VIT PASS** |
+| `host/npukit_vit_mnist.ipynb` | MNIST tiny-ViT T=16×D=16×L=2, deploy-faithful QAT | **ALL VIT PASS** |
 
 CLI on the board (same bit):
 
@@ -43,16 +43,15 @@ Geometry (no resize):
 - **Per-stage quant scales**: embed / block0 / block1 / cls (`act`, `w`, `p` where applicable)
 - Class head on CPU (`N_CLASS=10` not 8-aligned)
 
-Train: `host/train_vit_mnist.py` — full MNIST 60k + ± aug → float warm-up → **per-stage calibration** → STE QAT → `vit_mnist_weights.npz`.
+Train: `host/train_vit_mnist.py` — float warm-up → per-stage calibration → proxy STE QAT → **deploy-faithful fine-tune** (CE on board-ref numpy logits; STE grads via proxy) → `vit_mnist_weights.npz`.
 
 | Metric | Result |
 |--------|--------|
-| Float test (full) | ~**95.1%** |
-| QAT-mode test (full) | ~**95.0%** |
-| Numpy quantized ref (2048) | ~**80%** (trails QAT; Softmax/RMSNorm + Q12 depth) |
-| Board sample n=64 | ref **56/64 (87.5%)**, hw **55/64 (85.9%)** |
+| **Numpy quantized ref (full 10k test)** | **94.28%** |
+| Board sample n=64 labels | ref **60/64 (93.8%)**, hw **61/64 (95.3%)** |
 | ref↔hw pred agree | **63/64 (98.4%)** |
-| Numeric check | **ALL VIT PASS** (tight L0 abs tol; L1+ abs drift reported; ≥90% pred agree) |
+| Numeric check | **ALL VIT PASS** (tight L0; ≥90% pred agree) |
+| Float / proxy-QAT test | not the deploy metric (weights tuned for numpy/FPGA path) |
 
 “ALL VIT PASS” means FPGA tracks the quantized host path under the smoke gates — **not** 100% classification accuracy.
 
