@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Train tiny-ViT for NpuKit with scale calibration + STE QAT.
 
-Geometry: 28→16, patch 4, pair-average → T=8, D=8, 10 classes.
+Geometry: native 28×28, patch 7 → T=16, patch vec 49→pad56, D=8, 10 classes.
 
 Pipeline:
   1) Float warm-up
@@ -106,17 +106,21 @@ def load_mnist() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
 
 
 def preprocess_batch(imgs28: torch.Tensor) -> torch.Tensor:
-    imgs = imgs28.unsqueeze(1)
-    imgs16 = F.interpolate(imgs, size=(vit.IMG, vit.IMG), mode="nearest").squeeze(1)
-    b, h, w = imgs16.shape
+    """[B,28,28] → padded patch tokens [B,T,PATCH_DIM] (no resize)."""
+    assert imgs28.shape[-2:] == (vit.IMG, vit.IMG)
+    b = imgs28.shape[0]
     p = vit.PATCH
-    gh = h // p
+    gh = vit.IMG // p
     patches = (
-        imgs16.reshape(b, gh, p, gh, p)
+        imgs28.reshape(b, gh, p, gh, p)
         .permute(0, 1, 3, 2, 4)
         .reshape(b, gh * gh, p * p)
     )
-    return 0.5 * (patches[:, 0::2, :] + patches[:, 1::2, :])
+    if vit.PATCH_DIM == vit.PATCH_DIM_RAW:
+        return patches
+    out = torch.zeros(b, vit.VIT_T, vit.PATCH_DIM, dtype=patches.dtype, device=patches.device)
+    out[..., : vit.PATCH_DIM_RAW] = patches
+    return out
 
 
 class TinyViT(nn.Module):

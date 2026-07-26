@@ -14,7 +14,7 @@ Start a **small NPU** on PYNQ-Z2: an **8×8 int8 systolic array**, built and ver
 
 The **GEMM hardware MVP is complete**. Transformer **glue** (VERSION `0x300`: residual / GELU / RMSNorm / Softmax, `MAX_LEN=16`) meets **100 MHz** and passes on PYNQ-Z2 with `host/npukit_transformer.py`. Synthetic 1-layer e2e smoke (T=8×D=8) is **ALL E2E PASS** in `host/npukit_transformer_e2e.ipynb`. RoPE / masks / reshape stay on the A9.
 
-**WIP:** MNIST tiny-ViT at T=8 with QAT + calibrated scales (`train_vit_mnist.py`). Float ~81%, quantized ref ~79%. **Optional later:** T=16 after glue-len rebuild, ping-pong, depthwise, AXIS stimulus in `npukit_axil_tb`.
+**WIP done for MVP path:** MNIST tiny-ViT at **T=16** (native 28×28, patch 7, pad 49→56) with QAT + calibrated scales. Float ~84%, quantized ref ~81%, board sample **51/64** + **ALL VIT PASS**. **Optional later:** longer train, ping-pong, depthwise, AXIS stimulus in `npukit_axil_tb`.
 
 Docs: status [`docs/STATUS.md`](docs/STATUS.md), FPGA vs CPU [`docs/transformer_split.md`](docs/transformer_split.md), glue contract [`docs/transformer_glue.md`](docs/transformer_glue.md), bring-up [`docs/glue_bringup.md`](docs/glue_bringup.md), tiling [`docs/tiling.md`](docs/tiling.md).
 

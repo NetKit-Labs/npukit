@@ -1,6 +1,6 @@
 # NpuKit status
 
-Checkpoint after PYNQ-Z2 board re-verification (2026-07-26).
+Checkpoint after T=16 ViT + glue `len==MAX_LEN` bitstream (2026-07-26).
 
 ## Where we are
 
@@ -12,43 +12,56 @@ Checkpoint after PYNQ-Z2 board re-verification (2026-07-26).
 | Transformer glue | Residual / GELU / RMSNorm / Softmax, `MAX_LEN=16`, 100 MHz |
 | Host (A9) | Orchestration, quant/scales, RoPE / masks / reshape |
 
-Fabric clock: **PS FCLK0 @ 100 MHz**. Latest rebuild closed timing (**WNS ≈ +0.69 ns**). Glue `MAX_LEN=16` is timing headroom (current smoke peaks at length **8**); keep 16 unless utilization forces a shrink.
+Fabric clock: **PS FCLK0 @ 100 MHz**. Latest rebuild closed timing (**WNS ≈ +0.83 ns** post-route). Glue Softmax length **16** works on this bit (`len_r` holds `MAX_LEN`).
 
 ## Board results (saved notebooks)
-
-All three host notebooks talk to the **real PL** (not Icarus-only). Offline/ref cells exist inside them for golden checks; board cells load `npukit.bit`.
 
 | Notebook | What it covers | Result |
 |----------|----------------|--------|
 | `host/npukit_matmul.ipynb` | GEMM unit suite: classic 8×8 + tiled 16×16 / 32×32 | **12/12 PASS** |
 | `host/npukit_transformer.ipynb` | Glue unit ops + GEMM sanity on same bit | **ALL BOARD PASS** |
 | `host/npukit_transformer_e2e.ipynb` | Synthetic 1-layer block, T=8×D=8, fixed scales | **ALL E2E PASS** (ref + board) |
+| `host/npukit_vit_mnist.ipynb` | MNIST tiny-ViT T=16×D=8, trained QAT weights | **ALL VIT PASS** |
 
-CLI equivalents on the board (same bit):
+CLI on the board (same bit):
 
 ```bash
 python npukit_matmul.py /home/xilinx/jupyter_notebooks/npukit.bit 32 32 32
 python npukit_transformer.py /home/xilinx/jupyter_notebooks/npukit.bit
 python npukit_transformer.py /home/xilinx/jupyter_notebooks/npukit.bit --e2e
+python npukit_vit_mnist.py /home/xilinx/jupyter_notebooks/npukit.bit -n 64
 ```
 
-Icarus sims under `sim/` remain host-side RTL checks; they are separate from these notebooks.
+## MNIST tiny-ViT (current)
 
-## Geometry note
+Geometry (no resize):
 
-- GEMM tile is always **8×8**; larger matmuls (e.g. 32×32) are **host-tiled**, not a bigger array.
-- Glue vector length used today: unit tests **4**, e2e **8**, hardware cap **16**.
-- Multi-head attention does **not** require larger `MAX_LEN`; Softmax length tracks sequence **T**, not head count.
+- Native **28×28**, patch **7** → **T=16** tokens
+- Patch vector **49** zero-padded to **56** (GEMM 8-alignment)
+- Model dim **D=8**; class head on CPU (`N_CLASS=10`)
+
+Train path: float warm-up → scale calibration → STE QAT → export scales in `vit_mnist_weights.npz`.
+
+| Metric | Result |
+|--------|--------|
+| Float test (full) | ~**83.7%** |
+| QAT-mode test (full) | ~**83.3%** |
+| Numpy quantized ref (1024) | ~**80.8%** |
+| Board sample n=64 | ref **51/64 (79.7%)**, hw **51/64 (79.7%)** |
+| Numeric ref vs HW | **ALL VIT PASS** (within tol) |
+
+“ALL VIT PASS” means FPGA matches the quantized ref within tolerance — **not** 100% classification accuracy.
+
+## Geometry notes
+
+- GEMM tile is always **8×8**; larger matmuls are host-tiled.
+- Glue vector length: unit tests **4**, e2e **8**, ViT Softmax **16**, hardware cap **16**.
+- Multi-head attention does **not** require larger `MAX_LEN`.
 
 ## Next path
 
-1. **MNIST tiny-ViT (host)** — stay **T=8** / 28→16 resize for now
-   - `host/train_vit_mnist.py` → float warm-up + **scale calibration** + STE QAT
-   - Float test ~**81%**; numpy quantized ref ~**79%** (was ~40% before QAT/calibration)
-   - Calibrated scales stored in `vit_mnist_weights.npz` (`scale_act/w/p`)
-   - Board smoke: ref vs HW numeric match + batch accuracy
-   - Glue `len==16` RTL fix is in-tree; rebuild before T=16 Softmax
-2. **Next:** optional longer train / more QAT; real end-to-end accuracy on full test via board
-3. **Defer:** T=16 geometry, PE-grid growth, ping-pong, depthwise
+1. Longer train / more QAT if chasing higher MNIST accuracy
+2. Optional full test-set accuracy via board (slow)
+3. **Defer:** PE-grid growth, ping-pong, depthwise, wider D
 
 Related docs: [`transformer_split.md`](transformer_split.md), [`transformer_glue.md`](transformer_glue.md), [`glue_bringup.md`](glue_bringup.md), [`tiling.md`](tiling.md), [`../PLAN.md`](../PLAN.md).

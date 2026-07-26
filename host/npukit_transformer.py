@@ -372,7 +372,8 @@ def transformer_block_1layer(
     """
     x_q12 = np.asarray(x_q12, dtype=np.int32)
     t, d = x_q12.shape
-    assert t <= MAX_LEN and d == E2E_D and d % 8 == 0 and t % 8 == 0
+    assert t <= MAX_LEN and d % 8 == 0 and t % 8 == 0
+    assert d == E2E_D  # current host ViT / e2e use D=8
 
     dump: dict[str, np.ndarray] = {"x_in": x_q12.copy()}
     mm = dict(mmio=mmio, transport=transport, use_hw=use_hw,

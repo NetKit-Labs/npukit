@@ -1,23 +1,20 @@
 #!/usr/bin/env python3
-"""MNIST tiny-ViT host path for NpuKit (GEMM + glue, no RTL changes).
+"""MNIST tiny-ViT host path for NpuKit (GEMM + glue).
 
-Geometry (stay at T=8 for now):
-  - Resize digit 28→16
-  - Patch size 4 → 16 raw patches, pair-average → T=8 tokens
-  - Model dim D=8 (matches 8×8 GEMM tile)
+Geometry (T=16, no resize):
+  - Native 28×28 MNIST
+  - Patch size 7 → T=16 tokens (4×4 grid)
+  - Patch vector 7×7=49 zero-padded to 56 (GEMM 8-alignment)
+  - Model dim D=8
 
 Split:
-  - CPU: resize, patchify, pair-pool, position add, mean-pool, class head (10-way; not 8-aligned)
+  - CPU: patchify, pad, position add, mean-pool, class head (10-way; not 8-aligned)
   - FPGA: patch-projection GEMM, 1-layer transformer block (GEMM + glue)
 
-Train weights on the host:
-  python3 host/train_vit_mnist.py
-  → host/vit_mnist_weights.npz , host/mnist_sample.npz
+Requires glue bitstream with len==MAX_LEN fix (Softmax length 16).
 
-Usage:
-  python3 npukit_vit_mnist.py --ref-only
-  python3 npukit_vit_mnist.py --ref-only --weights vit_mnist_weights.npz
-  python3 npukit_vit_mnist.py /path/to/npukit.bit --weights vit_mnist_weights.npz
+Train:
+  python3 host/train_vit_mnist.py
 """
 
 from __future__ import annotations
@@ -36,12 +33,12 @@ DEFAULT_WEIGHTS = _HOST_DIR / "vit_mnist_weights.npz"
 DEFAULT_SAMPLE = _HOST_DIR / "mnist_sample.npz"
 
 # --- ViT-MNIST geometry (host contract) ---
-IMG = 16
-PATCH = 4
-RAW_T = (IMG // PATCH) * (IMG // PATCH)  # 16 raw patches
-VIT_T = 8  # pair-average RAW_T → 8 (Softmax len; see glue MAX_LEN=16 load bug)
+IMG = 28
+PATCH = 7
+VIT_T = (IMG // PATCH) * (IMG // PATCH)  # 16
 VIT_D = 8
-PATCH_DIM = PATCH * PATCH  # 16
+PATCH_DIM_RAW = PATCH * PATCH  # 49
+PATCH_DIM = ((PATCH_DIM_RAW + 7) // 8) * 8  # 56 — pad for 8×8 GEMM tiles
 N_CLASS = 10
 
 assert VIT_T <= nt.MAX_LEN and VIT_T % 8 == 0
@@ -52,7 +49,7 @@ assert VIT_D % 8 == 0 and PATCH_DIM % 8 == 0
 class VitMnistWeights:
     """Patch embed + 1-layer block + linear head (int8 / Q12)."""
 
-    w_pe: np.ndarray  # [PATCH_DIM, D] int8
+    w_pe: np.ndarray  # [PATCH_DIM, D] int8  (padded patch dim)
     pos: np.ndarray  # [T, D] Q12
     block: nt.TinyBlockWeights
     w_cls: np.ndarray  # [D, N_CLASS] int8
@@ -95,27 +92,28 @@ class VitMnistWeights:
         )
 
 
-def resize_nearest(img: np.ndarray, size: int = IMG) -> np.ndarray:
-    """Nearest-neighbor resize HxW → size×size (no PIL dependency)."""
+def patchify(img: np.ndarray, patch: int = PATCH) -> np.ndarray:
+    """[H,W] → [T, P*P] row-major patches (no resize; H=W=IMG)."""
     img = np.asarray(img, dtype=np.float64)
-    assert img.ndim == 2
     h, w = img.shape
-    ys = (np.arange(size) * h / size).astype(int)
-    xs = (np.arange(size) * w / size).astype(int)
-    return img[ys][:, xs]
-
-
-def patchify(img16: np.ndarray, patch: int = PATCH) -> np.ndarray:
-    """[H,W] → [T, P*P] row-major patches."""
-    img16 = np.asarray(img16, dtype=np.float64)
-    h, w = img16.shape
     assert h == w == IMG and h % patch == 0
     gh = h // patch
     return (
-        img16.reshape(gh, patch, gh, patch)
+        img.reshape(gh, patch, gh, patch)
         .transpose(0, 2, 1, 3)
         .reshape(gh * gh, patch * patch)
     )
+
+
+def pad_patches(patches: np.ndarray) -> np.ndarray:
+    """Pad patch vectors 49 → 56 for GEMM alignment."""
+    p = np.asarray(patches, dtype=np.float64)
+    assert p.shape[-1] == PATCH_DIM_RAW
+    if PATCH_DIM == PATCH_DIM_RAW:
+        return p
+    out = np.zeros(p.shape[:-1] + (PATCH_DIM,), dtype=np.float64)
+    out[..., :PATCH_DIM_RAW] = p
+    return out
 
 
 def synthetic_digit(rng: np.random.Generator, label: int, size: int = 28) -> np.ndarray:
@@ -173,13 +171,6 @@ def load_or_synth_batch(
     return imgs, labels
 
 
-def pool_patches_to_t8(patches: np.ndarray) -> np.ndarray:
-    """Average adjacent raw patches: [16, P] → [8, P] (whole-image coverage)."""
-    p = np.asarray(patches, dtype=np.float64)
-    assert p.shape[0] == RAW_T
-    return 0.5 * (p[0::2] + p[1::2])
-
-
 def embed_patches_q12(
     patches: np.ndarray,
     w: VitMnistWeights,
@@ -223,10 +214,11 @@ def vit_forward(
     verbose: bool = False,
 ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     """One image → logits Q12 [10] + dump."""
-    img16 = resize_nearest(img28, IMG)
-    raw = patchify(img16, PATCH)
-    patches = pool_patches_to_t8(raw)
-    dump: dict[str, np.ndarray] = {"img16": img16, "patches_raw": raw, "patches": patches}
+    img = np.asarray(img28, dtype=np.float64)
+    assert img.shape == (IMG, IMG)
+    raw = patchify(img, PATCH)
+    patches = pad_patches(raw)
+    dump: dict[str, np.ndarray] = {"img28": img, "patches_raw": raw, "patches": patches}
 
     tokens = embed_patches_q12(
         patches, w, glue=glue, mmio=mmio, transport=transport, use_hw=use_hw
@@ -280,7 +272,10 @@ def run_vit_smoke(
     imgs, labels = load_or_synth_batch(n=n, seed=seed + 1)
 
     print("=== MNIST tiny-ViT smoke ===")
-    print(f"IMG={IMG} PATCH={PATCH} T={VIT_T} D={VIT_D} classes={N_CLASS}")
+    print(
+        f"IMG={IMG} PATCH={PATCH} T={VIT_T} D={VIT_D} "
+        f"patch_dim={PATCH_DIM_RAW}->pad{PATCH_DIM} classes={N_CLASS}"
+    )
     print(f"scales ACT/W/P={w.scale_act:.2f}/{w.scale_w:.2f}/{w.scale_p:.2f}")
     print(f"weights={wsrc}")
 
