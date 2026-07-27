@@ -13,9 +13,14 @@ Pipeline:
   5) Export int8/Q12 weights + calibrated scales
   6) Report numpy quantized-path accuracy (full test set by default)
 
+Training knobs (no CNN stem / no patch overlap): shift aug, AdamW + cosine LR,
+grad clip, optional scale recal, longer deploy-faithful fine-tune.
+Resume deploy-FT from an exported npz with --init-weights.
+
 Usage:
   python3 host/train_vit_mnist.py
-  python3 host/train_vit_mnist.py --epochs 10 --qat-epochs 8
+  python3 host/train_vit_mnist.py --init-weights host/vit_mnist_weights.npz \\
+      --epochs 0 --qat-epochs 0 --deploy-epochs 12 --no-recalibrate-after-qat
 """
 
 from __future__ import annotations
@@ -108,22 +113,39 @@ def load_mnist() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     return x_tr, y_tr, x_te, y_te
 
 
-def augment_batch(imgs28: torch.Tensor, *, max_shift: int = 2) -> torch.Tensor:
-    """Cheap MNIST aug: random integer translate (zero pad). Full 60k + shifts ≈ more data."""
-    if max_shift <= 0:
-        return imgs28
-    b, h, w = imgs28.shape
-    device = imgs28.device
-    out = torch.zeros_like(imgs28)
-    dy = torch.randint(-max_shift, max_shift + 1, (b,), device=device)
-    dx = torch.randint(-max_shift, max_shift + 1, (b,), device=device)
-    for i in range(b):
-        y0, x0 = int(dy[i]), int(dx[i])
-        src_y0, src_y1 = max(0, -y0), h - max(0, y0)
-        dst_y0, dst_y1 = max(0, y0), h - max(0, -y0)
-        src_x0, src_x1 = max(0, -x0), w - max(0, x0)
-        dst_x0, dst_x1 = max(0, x0), w - max(0, -x0)
-        out[i, dst_y0:dst_y1, dst_x0:dst_x1] = imgs28[i, src_y0:src_y1, src_x0:src_x1]
+def augment_batch(
+    imgs28: torch.Tensor,
+    *,
+    max_shift: int = 2,
+    noise_std: float = 0.0,
+    erase_prob: float = 0.0,
+    erase_size: int = 4,
+) -> torch.Tensor:
+    """MNIST aug (no CNN stem / no patch overlap): shift, noise, small erase."""
+    out = imgs28
+    b, h, w = out.shape
+    device = out.device
+    if max_shift > 0:
+        shifted = torch.zeros_like(out)
+        dy = torch.randint(-max_shift, max_shift + 1, (b,), device=device)
+        dx = torch.randint(-max_shift, max_shift + 1, (b,), device=device)
+        for i in range(b):
+            y0, x0 = int(dy[i]), int(dx[i])
+            src_y0, src_y1 = max(0, -y0), h - max(0, y0)
+            dst_y0, dst_y1 = max(0, y0), h - max(0, -y0)
+            src_x0, src_x1 = max(0, -x0), w - max(0, x0)
+            dst_x0, dst_x1 = max(0, x0), w - max(0, -x0)
+            shifted[i, dst_y0:dst_y1, dst_x0:dst_x1] = out[i, src_y0:src_y1, src_x0:src_x1]
+        out = shifted
+    if noise_std > 0:
+        out = (out + noise_std * torch.randn_like(out)).clamp(0.0, 1.0)
+    if erase_prob > 0 and erase_size > 0:
+        mask = torch.rand(b, device=device) < erase_prob
+        if bool(mask.any()):
+            for i in torch.nonzero(mask, as_tuple=False).flatten().tolist():
+                y0 = int(torch.randint(0, max(1, h - erase_size + 1), (1,), device=device))
+                x0 = int(torch.randint(0, max(1, w - erase_size + 1), (1,), device=device))
+                out[i, y0 : y0 + erase_size, x0 : x0 + erase_size] = 0.0
     return out
 
 
@@ -447,6 +469,47 @@ def deploy_numpy_logits(model: TinyViT, imgs28: torch.Tensor) -> torch.Tensor:
     return torch.from_numpy(arr).to(device=imgs28.device, dtype=imgs28.dtype)
 
 
+def load_weights_into_model(model: TinyViT, path: Path, device: torch.device) -> None:
+    """Load exported int8/Q12 npz back into float TinyViT (for continued deploy-FT)."""
+    w = vit.VitMnistWeights.load(path)
+    model.w_pe.data.copy_(
+        torch.from_numpy((w.w_pe.astype(np.float32) / float(w.scale_embed.w)))
+    )
+    model.pos.data.copy_(
+        torch.from_numpy(nt.from_q12(w.pos).astype(np.float32))
+    )
+    model.w_cls.data.copy_(
+        torch.from_numpy((w.w_cls.astype(np.float32) / float(w.scale_cls.w)))
+    )
+    model.scale_embed = w.scale_embed
+    model.scale_cls = w.scale_cls
+    model.scale_blocks = list(w.scale_blocks)
+    for blk, bw, sc in zip(model.blocks, w.blocks, w.scale_blocks):
+        sw = float(sc.w)
+        blk.wq.data.copy_(torch.from_numpy(bw.wq.astype(np.float32) / sw))
+        blk.wk.data.copy_(torch.from_numpy(bw.wk.astype(np.float32) / sw))
+        blk.wv.data.copy_(torch.from_numpy(bw.wv.astype(np.float32) / sw))
+        blk.wo.data.copy_(torch.from_numpy(bw.wo.astype(np.float32) / sw))
+        blk.w1.data.copy_(torch.from_numpy(bw.w1.astype(np.float32) / sw))
+        blk.w2.data.copy_(torch.from_numpy(bw.w2.astype(np.float32) / sw))
+        blk.gamma1.data.copy_(
+            torch.from_numpy(nt.from_q12(bw.gamma1).astype(np.float32))
+        )
+        blk.gamma2.data.copy_(
+            torch.from_numpy(nt.from_q12(bw.gamma2).astype(np.float32))
+        )
+    model.to(device)
+    print(
+        f"loaded {path} → float TinyViT  "
+        f"embed={model.scale_embed.act:.1f}/{model.scale_embed.w:.1f}  "
+        + " ".join(
+            f"L{i}={s.act:.1f}/{s.w:.1f}/{s.p:.1f}"
+            for i, s in enumerate(model.scale_blocks)
+        )
+        + f"  cls={model.scale_cls.act:.1f}/{model.scale_cls.w:.1f}"
+    )
+
+
 def export_weights(model: TinyViT) -> None:
     payload: dict[str, np.ndarray] = {
         "w_pe": _quant_weight(model.w_pe, model.scale_embed.w),
@@ -555,6 +618,8 @@ def train(args: argparse.Namespace) -> int:
 
     torch.manual_seed(args.seed)
     model = TinyViT().to(device)
+    if args.init_weights:
+        load_weights_into_model(model, Path(args.init_weights), device)
 
     def run_epochs(
         tag: str,
@@ -564,8 +629,13 @@ def train(args: argparse.Namespace) -> int:
         lr: float,
         deploy_faithful: bool = False,
         eval_deploy: bool = False,
+        label_smoothing: float = 0.0,
+        recal_every: int = 0,
     ) -> None:
-        opt = torch.optim.Adam(model.parameters(), lr=lr)
+        opt = torch.optim.AdamW(
+            model.parameters(), lr=lr, weight_decay=args.weight_decay
+        )
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(n_epochs, 1))
         for epoch in range(1, n_epochs + 1):
             model.train()
             total_loss = 0.0
@@ -574,14 +644,26 @@ def train(args: argparse.Namespace) -> int:
                 xb = xb.to(device)
                 yb = yb.to(device)
                 if args.augment:
-                    xb = augment_batch(xb, max_shift=args.aug_shift)
+                    xb = augment_batch(
+                        xb,
+                        max_shift=args.aug_shift,
+                        noise_std=args.aug_noise,
+                        erase_prob=args.aug_erase_prob,
+                        erase_size=args.aug_erase_size,
+                    )
                 opt.zero_grad(set_to_none=True)
                 logits = model(xb, qat=qat, deploy_faithful=deploy_faithful)
-                loss = F.cross_entropy(logits, yb)
+                loss = F.cross_entropy(logits, yb, label_smoothing=label_smoothing)
                 loss.backward()
+                if args.grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
                 opt.step()
                 total_loss += float(loss.item()) * int(yb.numel())
                 n += int(yb.numel())
+            sched.step()
+            if qat and recal_every > 0 and epoch % recal_every == 0 and epoch < n_epochs:
+                print(f"{tag} epoch {epoch:02d}: re-calibrate scales")
+                calibrate_scales(model, cal_loader, device, batches=args.cal_batches)
             te_acc = accuracy(
                 model,
                 te_loader,
@@ -591,7 +673,7 @@ def train(args: argparse.Namespace) -> int:
             )
             print(
                 f"{tag} epoch {epoch:02d}  loss={total_loss / max(n, 1):.4f}  "
-                f"test_acc={te_acc * 100:.2f}%  "
+                f"test_acc={te_acc * 100:.2f}%  lr={sched.get_last_lr()[0]:.2e}  "
                 f"scales L0={model.scale_blocks[0].act:.1f}/"
                 f"{model.scale_blocks[0].w:.1f}/{model.scale_blocks[0].p:.1f}"
             )
@@ -599,12 +681,32 @@ def train(args: argparse.Namespace) -> int:
     print(
         f"train tiny-ViT T={vit.VIT_T} D={vit.VIT_D} L={vit.N_LAYERS} "
         f"float={args.epochs} qat={args.qat_epochs} deploy_ft={args.deploy_epochs} "
-        f"train_n={len(y_tr)} aug={args.augment}/{args.aug_shift} device={device}"
+        f"init={args.init_weights or '-'} "
+        f"train_n={len(y_tr)} aug={args.augment}/shift{args.aug_shift}/"
+        f"noise{args.aug_noise}/erase{args.aug_erase_prob} device={device}"
     )
-    run_epochs("float", args.epochs, qat=False, lr=args.lr)
-    calibrate_scales(model, cal_loader, device, batches=args.cal_batches)
+    if args.epochs > 0:
+        run_epochs(
+            "float",
+            args.epochs,
+            qat=False,
+            lr=args.lr,
+            label_smoothing=args.label_smoothing,
+        )
+    if args.epochs > 0 or not args.init_weights:
+        calibrate_scales(model, cal_loader, device, batches=args.cal_batches)
     if args.qat_epochs > 0:
-        run_epochs("qat", args.qat_epochs, qat=True, lr=args.lr * args.qat_lr_mult)
+        run_epochs(
+            "qat",
+            args.qat_epochs,
+            qat=True,
+            lr=args.lr * args.qat_lr_mult,
+            label_smoothing=args.label_smoothing,
+            recal_every=args.qat_recal_every,
+        )
+    if args.recalibrate_after_qat and args.deploy_epochs > 0:
+        print("re-calibrate scales (pre-deploy)")
+        calibrate_scales(model, cal_loader, device, batches=args.cal_batches)
     if args.deploy_epochs > 0:
         # Fine-tune so CE sees board-ref numpy logits (STE grads via proxy QAT).
         if args.qat_batch > 0 and args.qat_batch != args.batch:
@@ -616,6 +718,7 @@ def train(args: argparse.Namespace) -> int:
             lr=args.lr * args.qat_lr_mult * args.deploy_lr_mult,
             deploy_faithful=True,
             eval_deploy=False,  # proxy acc; numpy full eval at end
+            label_smoothing=0.0,  # match deploy CE
         )
 
     export_weights(model)
@@ -632,10 +735,15 @@ def train(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Train MNIST tiny-ViT for NpuKit (QAT)")
-    p.add_argument("--epochs", type=int, default=20)
-    p.add_argument("--qat-epochs", type=int, default=12)
+    p.add_argument("--epochs", type=int, default=20, help="float warm-up epochs (0=skip)")
+    p.add_argument("--qat-epochs", type=int, default=12, help="0=skip")
     p.add_argument("--qat-lr-mult", type=float, default=0.25)
     p.add_argument("--cal-batches", type=int, default=30)
+    p.add_argument(
+        "--init-weights",
+        default="",
+        help="load vit_mnist_weights.npz and continue (dequant to float)",
+    )
     p.add_argument(
         "--eval-n",
         type=int,
@@ -651,20 +759,43 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--deploy-epochs",
         type=int,
-        default=6,
+        default=12,
         help="extra epochs with board-ref numpy logits STE",
     )
     p.add_argument(
         "--deploy-lr-mult",
         type=float,
-        default=0.5,
+        default=0.4,
         help="LR multiplier on top of qat-lr during deploy fine-tune",
+    )
+    p.add_argument(
+        "--recalibrate-after-qat",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="re-run per-stage scale calib before deploy-FT",
+    )
+    p.add_argument(
+        "--qat-recal-every",
+        type=int,
+        default=0,
+        help="re-calibrate scales every N QAT epochs (0 = off)",
     )
     p.add_argument("--batch", type=int, default=128)
     p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--weight-decay", type=float, default=1e-5)
+    p.add_argument("--grad-clip", type=float, default=1.0)
+    p.add_argument(
+        "--label-smoothing",
+        type=float,
+        default=0.0,
+        help="CE label smoothing for float/QAT (deploy uses 0)",
+    )
     p.add_argument("--subset", type=int, default=0, help="0 = full train set (60k)")
     p.add_argument("--augment", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--aug-shift", type=int, default=2, help="max ±px translate")
+    p.add_argument("--aug-noise", type=float, default=0.0, help="gaussian noise std")
+    p.add_argument("--aug-erase-prob", type=float, default=0.0)
+    p.add_argument("--aug-erase-size", type=int, default=4)
     p.add_argument("--sample-n", type=int, default=64)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cpu")

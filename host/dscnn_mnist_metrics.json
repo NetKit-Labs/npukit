@@ -1,0 +1,10 @@
+{
+  "test_acc_float": 0.98,
+  "test_acc_int8": 0.9839,
+  "n_params": 9034,
+  "n_test": 10000,
+  "epochs": 6,
+  "qat_epochs": 3,
+  "notes": "MCU-class host DS-CNN (BN-fold, per-tensor fake-int8, STE QAT); peer vs MCU+NpuKit ViT deploy-quant ~94.28% (accuracy+KiB+compute locus)",
+  "test_acc": 0.9839
+}

@@ -23,6 +23,7 @@ Part of [NetKit Labs](https://github.com/NetKit-Labs) — companion direction to
 | yes | Host `host/npukit_transformer.py` + `.ipynb` (glue + GEMM); RoPE / mask / reshape stay on A9 |
 | yes | E2E 1-layer smoke T=8×D=8 + fixed scales — `host/npukit_transformer_e2e.ipynb` (**ALL E2E PASS**) |
 | yes | MNIST tiny-ViT T=16×D=16×L=2 + per-stage scales + deploy-faithful QAT (~**94%** numpy/full test; board **ALL VIT PASS**) |
+| yes | Host MCU-class DS-CNN MNIST peer (int8 ~**98.4%** / ~8 KiB; vs MCU+NpuKit tiny-ViT ~**94%** / ~4 KiB) |
 
 Status write-up (results + next path): **[`docs/STATUS.md`](docs/STATUS.md)**.
 

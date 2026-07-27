@@ -1,6 +1,6 @@
 # NpuKit status
 
-Checkpoint after deploy-faithful QAT (T=16 × D=16 × L=2, per-stage scales) (2026-07-26).
+Checkpoint after board re-smoke + host DS-CNN peer (T=16 × D=16 × L=2, per-stage scales) (2026-07-27).
 
 ## Where we are
 
@@ -22,6 +22,7 @@ Fabric clock: **PS FCLK0 @ 100 MHz**. Latest rebuild closed timing (**WNS ≈ +0
 | `host/npukit_transformer.ipynb` | Glue unit ops + GEMM sanity on same bit | **ALL BOARD PASS** |
 | `host/npukit_transformer_e2e.ipynb` | Synthetic 1-layer block, T=8×D=8, fixed scales | **ALL E2E PASS** (ref + board) |
 | `host/npukit_vit_mnist.ipynb` | MNIST tiny-ViT T=16×D=16×L=2, deploy-faithful QAT | **ALL VIT PASS** |
+| `host/dscnn_mnist.ipynb` | Host-only DS-CNN MNIST reference (not on FPGA) | float **98.00%** / int8 **98.39%** |
 
 CLI on the board (same bit):
 
@@ -57,6 +58,34 @@ Train: `host/train_vit_mnist.py` — float warm-up → per-stage calibration →
 
 Example calibrated scales (order-of-magnitude; see npz): embed act/w ≈ 72/336, L0 ≈ 40/216/315, L1 ≈ 13/139/160, cls ≈ 16/130 — L0 vs L1 act differs a lot, which is why per-stage scales matter.
 
+## Edge comparison intent (MCU vs MCU+accelerator)
+
+Two **deployment-shaped** peers on the same MNIST task — not a param-matched bake-off:
+
+| Role | Model | What it mimics |
+|------|--------|----------------|
+| **MCU-class CNN** | Host DS-CNN (int8) | TinyML depthwise-separable CNN you’d run on a Cortex-M / TFLite Micro–class MCU (DW/PW, GAP, small FC; ~8 KiB int8 weights) |
+| **MCU/MPU + accelerator ViT** | Tiny-ViT on NpuKit | Micro transformer the MCU/MPU *schedules*, with GEMM + glue on the FPGA fabric (T=16×D=16×L=2; ~4 KiB weights) |
+
+Do **not** force equal layer counts or equal params: a real MCU DS-CNN and a real accelerator-backed tiny ViT are different products. Compare **task accuracy + weight footprint + where compute runs**.
+
+## DS-CNN host reference (MCU-class peer)
+
+Host-only TinyML-style DS-CNN — **not** a ViT CNN stem and **not** mapped to the FPGA. Int8 path is the headline number (MCU deploy shape).
+
+Pipeline: float train → BN-fold → per-tensor calibrate → STE QAT → `dscnn_mnist_int8.npz`.
+
+| Item | Value |
+|------|--------|
+| Train / eval | `host/train_dscnn_mnist.py`, `host/dscnn_mnist.py`, `host/dscnn_mnist.ipynb` |
+| Weights / metrics | `dscnn_mnist_weights.pt`, `dscnn_mnist_int8.npz`, `dscnn_mnist_metrics.json` |
+| Params / int8 weights | **~9.0k** / **~8.3 KiB** |
+| Float test (full 10k) | **98.00%** |
+| **Int8 test (full 10k)** | **98.39%** (MCU-shaped headline) |
+| ViT deploy-quant (full 10k) | **94.28%** (~4.3 KiB; FPGA path) |
+
+Headline compare: **MCU DS-CNN int8** vs **MCU+NpuKit ViT deploy-quant** (accuracy + KiB + compute locus).
+
 ## Geometry notes
 
 - GEMM tile is always **8×8**; larger matmuls are host-tiled.
@@ -66,8 +95,8 @@ Example calibrated scales (order-of-magnitude; see npz): embed act/w ≈ 72/336,
 
 ## Next path
 
-1. Optional longer deploy-FT / host CNN stem if chasing higher MNIST labels
+1. Keep both peers **deployment-shaped** (MCU DS-CNN vs MCU+accel ViT); optional longer ViT deploy-FT for FPGA labels
 2. **Per-head scales** when multi-head attention is added
-3. **Defer:** PE-grid growth, ping-pong, depthwise, RTL wider than D=16
+3. **Defer:** PE-grid growth, ping-pong, depthwise / CNN on FPGA, RTL wider than D=16
 
 Related docs: [`transformer_split.md`](transformer_split.md), [`transformer_glue.md`](transformer_glue.md), [`glue_bringup.md`](glue_bringup.md), [`tiling.md`](tiling.md), [`../PLAN.md`](../PLAN.md).

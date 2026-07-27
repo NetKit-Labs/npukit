@@ -14,7 +14,11 @@ Start a **small NPU** on PYNQ-Z2: an **8×8 int8 systolic array**, built and ver
 
 The **GEMM hardware MVP is complete**. Transformer **glue** (VERSION `0x300`: residual / GELU / RMSNorm / Softmax, `MAX_LEN=16`) meets **100 MHz** and passes on PYNQ-Z2 with `host/npukit_transformer.py`. Synthetic 1-layer e2e smoke (T=8×D=8) is **ALL E2E PASS** in `host/npukit_transformer_e2e.ipynb`. RoPE / masks / reshape stay on the A9.
 
-**Host ViT path done for this MVP:** MNIST tiny-ViT **T=16×D=16×L=2**, per-stage scales, **deploy-faithful QAT**. Numpy/board-ref **~94.3%** on full test; board sample ~94% labels, pred agree ~98%, **ALL VIT PASS**. **Optional later:** per-head scales (MHA), host CNN stem, ping-pong, depthwise.
+**Host ViT path done for this MVP:** MNIST tiny-ViT **T=16×D=16×L=2**, per-stage scales, **deploy-faithful QAT**. Numpy/board-ref **~94.3%** on full test; board sample ~94% labels, pred agree ~98%, **ALL VIT PASS**.
+
+**Edge peers (not param-matched):** (1) **MCU-class DS-CNN** — TinyML DW/PW CNN, host int8 ~**98.4%** / ~8 KiB (`host/train_dscnn_mnist.py`); (2) **MCU/MPU + accelerator tiny-ViT** — T=16×D=16×L=2 on NpuKit, deploy-quant ~**94.3%** / ~4 KiB. Compare accuracy + footprint + where compute runs.
+
+**Optional later:** per-head scales (MHA), longer ViT deploy-FT, ping-pong, depthwise / CNN on FPGA.
 
 Docs: status [`docs/STATUS.md`](docs/STATUS.md), FPGA vs CPU [`docs/transformer_split.md`](docs/transformer_split.md), glue contract [`docs/transformer_glue.md`](docs/transformer_glue.md), bring-up [`docs/glue_bringup.md`](docs/glue_bringup.md), tiling [`docs/tiling.md`](docs/tiling.md).
 
@@ -22,7 +26,7 @@ Docs: status [`docs/STATUS.md`](docs/STATUS.md), FPGA vs CPU [`docs/transformer_
 
 - `rtl/pe.sv`, `rtl/systolic_array.sv`, `rtl/npukit_glue.sv`, `rtl/npukit_axil.sv`, `rtl/npukit_top.sv`, `rtl/npukit_pl.v`
 - `sim/pe_tb.sv`, `sim/systolic_array_tb.sv`, `sim/npukit_axil_tb.sv`, `sim/npukit_glue_tb.sv`
-- `host/npukit_matmul.py`, `host/npukit_matmul.ipynb`, `host/npukit_transformer.py`, `host/npukit_transformer_e2e.ipynb`
+- `host/npukit_matmul.py`, `host/npukit_matmul.ipynb`, `host/npukit_transformer.py`, `host/npukit_transformer_e2e.ipynb`, `host/dscnn_mnist.py`, `host/train_dscnn_mnist.py`
 - `docs/STATUS.md`, `docs/tiling.md`, `docs/transformer_split.md`, `docs/transformer_glue.md`, `docs/glue_bringup.md`
 - `scripts/create_project.tcl`, `scripts/build_bitstream.tcl`, `scripts/pynq_bitstream.tcl`
 
@@ -76,6 +80,7 @@ An int8 8×8 GEMM covers MLP/FC and 1×1 conv; standard conv can be lowered to G
 - Transformer glue v0x300: **done** (100 MHz closed; board residual/GELU/RMSNorm/Softmax + GEMM PASS).
 - Synthetic 1-layer e2e T=8×D=8: **done** (**ALL E2E PASS** in `host/npukit_transformer_e2e.ipynb`).
 - MNIST tiny-ViT T=16×D=16×L=2 + per-stage scales + deploy-faithful QAT: **done** (numpy/full test **~94.3%**; board **ALL VIT PASS**; see [`docs/STATUS.md`](docs/STATUS.md)).
+- Host DS-CNN MNIST reference: **done** (float **98.00%** / int8 **98.39%** / 10k; not FPGA; see [`docs/STATUS.md`](docs/STATUS.md)).
 - Rebuild with `../scripts/build_bitstream.sh npukit` (or in-repo `scripts/`) after RTL/BD changes.
 
 ### Z7020 size note
