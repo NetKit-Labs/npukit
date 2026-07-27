@@ -508,6 +508,38 @@ def run_eval(
     return m
 
 
+def bench_tflite_xnnpack(*, n: int = 64, warmup: int = 4) -> dict:
+    """A9 peer latency via TFLite (XNNPACK-backed)."""
+    from xnnpack_cnn import DSCNN_TFLITE, load_dscnn_tflite
+
+    sample = HOST_DIR / "mnist_sample.npz"
+    if not sample.exists():
+        raise FileNotFoundError(sample)
+    imgs = np.load(sample)["images"][:n].astype(np.float32)
+    labels = np.load(sample)["labels"][:n]
+    m = load_dscnn_tflite()
+    x0 = imgs[0].reshape(1, 28, 28, 1)
+    ms = m.time_ms(x0, warmup=warmup, iters=max(16, warmup))
+    correct = 0
+    for i in range(len(imgs)):
+        y = m(imgs[i].reshape(1, 28, 28, 1)).reshape(-1)
+        correct += int(int(y.argmax()) == int(labels[i]))
+    out = {
+        "backend": m.backend,
+        "delegate": m.delegate,
+        "ms_per_image": ms,
+        "batch_acc": correct / max(len(imgs), 1),
+        "n": len(imgs),
+        "model": str(DSCNN_TFLITE),
+    }
+    print("=== DS-CNN TFLite + XNNPACK (A9 peer) ===")
+    print(
+        f"backend={out['backend']} delegate={out['delegate']}  "
+        f"{ms:.2f} ms/img  acc={100 * out['batch_acc']:.1f}% (n={out['n']})"
+    )
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Eval host DS-CNN MNIST reference")
     p.add_argument("--batch", type=int, default=256)
@@ -518,7 +550,16 @@ def main(argv: list[str] | None = None) -> int:
         help="re-calibrate + QAT from float weights even if int8 npz exists",
     )
     p.add_argument("--qat-epochs", type=int, default=3)
+    p.add_argument(
+        "--tflite-bench",
+        action="store_true",
+        help="bench dscnn_mnist.tflite with TFLite/XNNPACK (A9)",
+    )
+    p.add_argument("--bench-n", type=int, default=64)
     args = p.parse_args(argv)
+    if args.tflite_bench:
+        bench_tflite_xnnpack(n=args.bench_n)
+        return 0
     if not WEIGHTS_PATH.exists():
         print(f"missing {WEIGHTS_PATH} — run: python3 host/train_dscnn_mnist.py")
         return 1

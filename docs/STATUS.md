@@ -1,6 +1,6 @@
 # NpuKit status
 
-Checkpoint after board re-smoke + host DS-CNN peer (T=16 × D=16 × L=2, per-stage scales) (2026-07-27).
+Checkpoint after board re-smoke of deploy-track ViT (richer DS-stem, L=4, MLP=32, per-channel weights, A9 float Softmax/RMSNorm/GELU) (2026-07-27).
 
 ## Where we are
 
@@ -9,28 +9,37 @@ Checkpoint after board re-smoke + host DS-CNN peer (T=16 × D=16 × L=2, per-sta
 | Block | Role |
 |-------|------|
 | 8×8 int8 systolic GEMM | Output-stationary; tiled MxKxN via host DMA/MMIO |
-| Transformer glue | Residual / GELU / RMSNorm / Softmax, `MAX_LEN=16`, 100 MHz |
-| Host (A9) | Orchestration, per-stage quant/scales, deploy-faithful train, RoPE / masks / reshape |
+| Transformer glue | Residual / GELU / RMSNorm / Softmax, `MAX_LEN=16`, 100 MHz (optional path) |
+| Host (A9) | Orchestration, per-channel quant/scales, DS-stem, float Softmax/RMSNorm/GELU |
 
-Fabric clock: **PS FCLK0 @ 100 MHz**. Latest rebuild closed timing (**WNS ≈ +0.83 ns** post-route). Glue Softmax length **16** works on this bit (`len_r` holds `MAX_LEN`).
+Fabric clock: **PS FCLK0 @ 100 MHz**. Latest rebuild closed timing (**WNS ≈ +0.83 ns** post-route).
 
-## Board results (saved notebooks)
+## Board results (2026-07-27 re-smoke)
 
-| Notebook | What it covers | Result |
-|----------|----------------|--------|
-| `host/npukit_matmul.ipynb` | GEMM unit suite: classic 8×8 + tiled 16×16 / 32×32 | **12/12 PASS** |
-| `host/npukit_transformer.ipynb` | Glue unit ops + GEMM sanity on same bit | **ALL BOARD PASS** |
-| `host/npukit_transformer_e2e.ipynb` | Synthetic 1-layer block, T=8×D=8, fixed scales | **ALL E2E PASS** (ref + board) |
-| `host/npukit_vit_mnist.ipynb` | MNIST tiny-ViT T=16×D=16×L=2, deploy-faithful QAT | **ALL VIT PASS** |
-| `host/dscnn_mnist.ipynb` | Host-only DS-CNN MNIST reference (not on FPGA) | float **98.00%** / int8 **98.39%** |
-| `host/npukit_board_smoke.ipynb` | One-shot matmul → glue → e2e → ViT | **ALL SMOKE PASS** |
+Captured in [`host/npukit_board_smoke.ipynb`](../host/npukit_board_smoke.ipynb) on `192.168.0.215` with current `vit_mnist_weights.npz`.
 
-CLI on the board (same bit):
+| Notebook / suite | What it covers | Result |
+|------------------|----------------|--------|
+| `host/npukit_board_smoke.ipynb` | matmul → glue → e2e → ViT | **ALL SMOKE PASS** (4/4) |
+| matmul | classic 8×8 + tiled 16/32 | **12/12 PASS** |
+| glue | unit ops + GEMM tile | **ALL BOARD PASS** |
+| e2e | synthetic 1-layer T=8×D=8 | **ALL E2E PASS** |
+| vit | DS-stem + T=16×D=16×MLP32×L=4, `glue=float`, int8 GEMM HW | **ALL VIT PASS** |
+| `host/dscnn_mnist.ipynb` | Host-only DS-CNN peer (not on FPGA) | float **98.00%** / int8 **98.39%** |
+
+ViT board sample **n=64**:
+
+| Metric | Result |
+|--------|--------|
+| ref accuracy | **62/64 (96.9%)** |
+| hw accuracy | **62/64 (96.9%)** |
+| ref↔hw pred agree | **64/64 (100%)** |
+| tensor max\|err\| | **0** (HW GEMM matches numpy GEMM with float norms) |
+
+CLI:
 
 ```bash
-python npukit_matmul.py /home/xilinx/jupyter_notebooks/npukit.bit 32 32 32
-python npukit_transformer.py /home/xilinx/jupyter_notebooks/npukit.bit
-python npukit_transformer.py /home/xilinx/jupyter_notebooks/npukit.bit --e2e
+python npukit_board_smoke.py /home/xilinx/jupyter_notebooks/npukit.bit --vit-n 64
 python npukit_vit_mnist.py /home/xilinx/jupyter_notebooks/npukit.bit -n 64
 ```
 
@@ -38,66 +47,52 @@ python npukit_vit_mnist.py /home/xilinx/jupyter_notebooks/npukit.bit -n 64
 
 Geometry (no resize):
 
-- Native **28×28**, patch **7** → **T=16** tokens
-- Patch vector **49** zero-padded to **56** (GEMM 8-alignment)
-- Model dim **D=16** (glue `MAX_LEN`; GEMM host-tiles 8×8)
-- **2 transformer layers** host-scheduled on the same GEMM + glue (time-multiplexed)
-- **Per-stage quant scales**: embed / block0 / block1 / cls (`act`, `w`, `p` where applicable)
+- Native **28×28** → **CPU richer DS-stem** (stem + 2× DW/PW) → **T=16×D=16** tokens
+- Model dim **D=16**, FFN hidden **MLP=32**, **L=4** transformer blocks
+- **int8 GEMM** on FPGA; **A9 float32** Softmax / RMSNorm / GELU (`glue_mode=float`)
+- **Per-channel weight scales** on stem + GEMM mats; per-stage act / attn-p scales
 - Class head on CPU (`N_CLASS=10` not 8-aligned)
-
-Train: `host/train_vit_mnist.py` — float warm-up → per-stage calibration → proxy STE QAT → **deploy-faithful fine-tune** (CE on board-ref numpy logits; STE grads via proxy) → `vit_mnist_weights.npz`.
+- Smoke uses **numpy int8 stem** (TFLite on A9 can SIGILL on `invoke`)
 
 | Metric | Result |
 |--------|--------|
-| **Numpy quantized ref (full 10k test)** | **94.28%** |
-| Board sample n=64 labels | ref **60/64 (93.8%)**, hw **61/64 (95.3%)** |
-| ref↔hw pred agree | **63/64 (98.4%)** |
-| Numeric check | **ALL VIT PASS** (tight L0; ≥90% pred agree) |
-| Float / proxy-QAT test | not the deploy metric (weights tuned for numpy/FPGA path) |
+| **Numpy quantized ref (full 10k test)** | **97.40%** |
+| Float test (full 10k) | **96.90%** |
+| Proxy QAT test (full 10k) | **97.38%** |
+| Proxy ↔ numpy gap (post-QAT) | **~0.6 pp** |
+| Learnable params (active path) | **~9.8k** (stem 1.0k + blocks 8.3k + pos/cls); ~10.7k incl. legacy `w_pe` |
+| Weight footprint (int8 + Q12) | **~11.5 KiB** |
+| Board sample n=64 | ref/hw **96.9%**, agree **100%**, **ALL VIT PASS** |
 
-“ALL VIT PASS” means FPGA tracks the quantized host path under the smoke gates — **not** 100% classification accuracy.
+## Edge comparison
 
-Example calibrated scales (order-of-magnitude; see npz): embed act/w ≈ 72/336, L0 ≈ 40/216/315, L1 ≈ 13/139/160, cls ≈ 16/130 — L0 vs L1 act differs a lot, which is why per-stage scales matter.
+| Role | Model | Headline |
+|------|--------|----------|
+| **MCU-class CNN** | Host DS-CNN (int8) | **98.39%** / ~**8.3 KiB** / **~9.0k** params |
+| **MCU/MPU + accelerator ViT** | Tiny-ViT on NpuKit | **97.40%** / ~**11.5 KiB** / **~9.8k** active params |
 
-## Edge comparison intent (MCU vs MCU+accelerator)
+Animated summary: [`viz/out/edge_peers.gif`](../viz/out/edge_peers.gif). Five-minute board path: [`host/board_bringup_5min.sh`](../host/board_bringup_5min.sh).
 
-Two **deployment-shaped** peers on the same MNIST task — not a param-matched bake-off:
+## What is complete
 
-| Role | Model | What it mimics | Headline |
-|------|--------|----------------|----------|
-| **MCU-class CNN** | Host DS-CNN (int8) | TinyML DW/PW CNN on Cortex-M / TFLite Micro–class MCU | **98.39%** / ~**8.3 KiB** |
-| **MCU/MPU + accelerator ViT** | Tiny-ViT on NpuKit | Micro transformer scheduled on GEMM + glue (T=16×D=16×L=2) | **94.28%** / ~**4.3 KiB** |
+- GEMM + glue RTL/bit @ 100 MHz, board unit + e2e PASS
+- Deploy-faithful tiny-ViT: CPU DS-stem + FPGA int8 GEMM + A9 float norms
+- Per-channel quant, stem-matched QAT, numpy deploy **97.40%**
+- Full board smoke with new weights: **ALL SMOKE PASS**, ViT ref↔hw **100%** agree
+- Host DS-CNN peer, Netron graphs, edge-peers GIF, 5-min bring-up script
 
-Do **not** force equal layer counts or equal params. Compare **task accuracy + weight footprint + where compute runs** (CNN = host MCU-shaped; ViT = FPGA path). Full bring-up: `host/npukit_board_smoke.py` / `.ipynb`.
+## Still optionally valuable
 
-## DS-CNN host reference (MCU-class peer)
-
-Host-only TinyML-style DS-CNN — **not** a ViT CNN stem and **not** mapped to the FPGA. Int8 path is the headline number (MCU deploy shape).
-
-Pipeline: float train → BN-fold → per-tensor calibrate → STE QAT → `dscnn_mnist_int8.npz`.
-
-| Item | Value |
-|------|--------|
-| Train / eval | `host/train_dscnn_mnist.py`, `host/dscnn_mnist.py`, `host/dscnn_mnist.ipynb` |
-| Weights / metrics | `dscnn_mnist_weights.pt`, `dscnn_mnist_int8.npz`, `dscnn_mnist_metrics.json` |
-| Params / int8 weights | **~9.0k** / **~8.3 KiB** |
-| Float test (full 10k) | **98.00%** |
-| **Int8 test (full 10k)** | **98.39%** (MCU-shaped headline) |
-| ViT deploy-quant (full 10k) | **94.28%** (~4.3 KiB; FPGA path) |
-
-Headline compare: **MCU DS-CNN int8** vs **MCU+NpuKit ViT deploy-quant** (accuracy + KiB + compute locus).
+1. Close the last **~1 pp** vs DS-CNN (slightly richer stem / longer float — not required for the story)
+2. Optional `d_ff=4×` experiment (larger KiB; uncertain gain)
+3. Depthwise / CNN path in RTL — only if profiling shows stem/DW dominate wall-clock
+4. PE-grid growth, ping-pong, HW glue for ViT deploy — deferred (float-on-A9 is winning for accuracy)
+5. Multi-head attention + per-head scales
 
 ## Geometry notes
 
-- GEMM tile is always **8×8**; larger matmuls are host-tiled.
-- Glue vector length: unit tests **4**, e2e **8**, ViT Softmax / row ops **16**, hardware cap **16**.
-- Softmax length tracks sequence **T**; residual/GELU/RMSNorm length track model dim **D** (both ≤ `MAX_LEN`).
-- Multi-head attention does **not** require larger `MAX_LEN`; add **per-head scales** when heads are introduced.
-
-## Next path
-
-1. Keep both peers **deployment-shaped** (MCU DS-CNN vs MCU+accel ViT); optional longer ViT deploy-FT for FPGA labels
-2. **Per-head scales** when multi-head attention is added
-3. **Defer:** PE-grid growth, ping-pong, depthwise / CNN on FPGA, RTL wider than D=16
+- GEMM tile is always **8×8**; larger matmuls are host-tiled (`MLP=32` is fine).
+- HW glue Softmax/RMSNorm/GELU stay capped at `MAX_LEN=16`; ViT deploy uses **float** norms so FFN hidden may exceed 16.
+- Multi-head attention does **not** require larger `MAX_LEN`.
 
 Related docs: [`transformer_split.md`](transformer_split.md), [`transformer_glue.md`](transformer_glue.md), [`glue_bringup.md`](glue_bringup.md), [`tiling.md`](tiling.md), [`../PLAN.md`](../PLAN.md).

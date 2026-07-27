@@ -20,6 +20,7 @@ output/*.hwh
 # Visualization render artifacts
 viz/out/*
 !viz/out/systolic_8x8_timesteps.pdf
+!viz/out/edge_peers.gif
 viz/.venv/
 viz/__pycache__/
 *.pyc

@@ -79,8 +79,30 @@ def from_q12(x: np.ndarray) -> np.ndarray:
     return np.asarray(x, dtype=np.int32).astype(np.float64) / ONE_Q12
 
 
+def to_q16(x: np.ndarray) -> np.ndarray:
+    return np.rint(np.asarray(x, dtype=np.float64) * ONE_Q16).astype(np.int32)
+
+
 def from_q16(x: np.ndarray) -> np.ndarray:
     return np.asarray(x, dtype=np.int32).astype(np.float64) / ONE_Q16
+
+
+# Weight scale: per-tensor float, or per-output-channel vector (last dim of W / C).
+ScaleW = float | np.ndarray
+
+
+def _as_scale_w(scale: ScaleW) -> float | np.ndarray:
+    if isinstance(scale, (float, int, np.floating, np.integer)):
+        return float(scale)
+    arr = np.asarray(scale, dtype=np.float64)
+    if arr.ndim == 0:
+        return float(arr)
+    return arr
+
+
+def _inv_scale_w(scale: ScaleW) -> float | np.ndarray:
+    s = _as_scale_w(scale)
+    return 1.0 / s if isinstance(s, float) else 1.0 / s
 
 
 # ---------------------------------------------------------------------------
@@ -231,9 +253,12 @@ def quantize_int8_activation(x_q12: np.ndarray, scale: float = SCALE_ACT) -> tup
     return q, 1.0 / scale
 
 
-def dequant_gemm_to_q12(c_i32: np.ndarray, a_scale: float, b_scale: float) -> np.ndarray:
-    """int32 GEMM accumulators → Q12 using fixed host scales."""
-    real = c_i32.astype(np.float64) * a_scale * b_scale
+def dequant_gemm_to_q12(
+    c_i32: np.ndarray, a_scale: float, b_scale: ScaleW
+) -> np.ndarray:
+    """int32 GEMM accumulators → Q12. b_scale may be per-output-channel [N]."""
+    bs = _as_scale_w(b_scale)
+    real = c_i32.astype(np.float64) * float(a_scale) * bs
     return to_q12(real)
 
 
@@ -242,8 +267,13 @@ def quant_q12_to_i8(x_q12: np.ndarray, scale: float = SCALE_ACT) -> np.ndarray:
     return np.clip(np.rint(xf * scale), -128, 127).astype(np.int8)
 
 
-def quant_weight_to_i8(w: np.ndarray, scale: float = SCALE_W) -> np.ndarray:
-    return np.clip(np.rint(np.asarray(w, dtype=np.float64) * scale), -128, 127).astype(np.int8)
+def quant_weight_to_i8(w: np.ndarray, scale: ScaleW = SCALE_W) -> np.ndarray:
+    """Quantize W. scale: scalar, or per-output-channel along last dim."""
+    wf = np.asarray(w, dtype=np.float64)
+    s = _as_scale_w(scale)
+    if not isinstance(s, float) and s.shape[-1] != wf.shape[-1]:
+        raise ValueError(f"weight scale shape {s.shape} vs W {wf.shape}")
+    return np.clip(np.rint(wf * s), -128, 127).astype(np.int8)
 
 
 def quant_q16_to_i8(p_q16: np.ndarray, scale: float = SCALE_P) -> np.ndarray:
@@ -251,10 +281,12 @@ def quant_q16_to_i8(p_q16: np.ndarray, scale: float = SCALE_P) -> np.ndarray:
     return np.clip(np.rint(pf * scale), -128, 127).astype(np.int8)
 
 
-def gemm_i8_to_q12(a_i8: np.ndarray, b_i8: np.ndarray, *, a_scale: float, b_scale: float) -> np.ndarray:
-    """NumPy stand-in for NPU int8 matmul + fixed dequant → Q12."""
+def gemm_i8_to_q12(
+    a_i8: np.ndarray, b_i8: np.ndarray, *, a_scale: float, b_scale: ScaleW
+) -> np.ndarray:
+    """NumPy stand-in for NPU int8 matmul + dequant → Q12."""
     c = a_i8.astype(np.int32) @ b_i8.astype(np.int32)
-    return dequant_gemm_to_q12(c, 1.0 / a_scale, 1.0 / b_scale)
+    return dequant_gemm_to_q12(c, 1.0 / a_scale, _inv_scale_w(b_scale))
 
 
 def _fmt_mat(name: str, mat: np.ndarray, *, as_q12: bool = False, as_q16: bool = False) -> str:
@@ -271,7 +303,7 @@ def _fmt_mat(name: str, mat: np.ndarray, *, as_q12: bool = False, as_q16: bool =
 
 @dataclass
 class TinyBlockWeights:
-    """1-layer block, D×D int8 weights + Q12 gammas. ViT can reuse this layout."""
+    """1-layer block: int8 projections + Q12 gammas. FFN may be D×mlp_h×D."""
 
     wq: np.ndarray
     wk: np.ndarray
@@ -281,53 +313,122 @@ class TinyBlockWeights:
     w2: np.ndarray
     gamma1: np.ndarray
     gamma2: np.ndarray
+    # Optional per-output-channel weight scales (None → caller scalar scale_w).
+    sw_wq: np.ndarray | None = None
+    sw_wk: np.ndarray | None = None
+    sw_wv: np.ndarray | None = None
+    sw_wo: np.ndarray | None = None
+    sw_w1: np.ndarray | None = None
+    sw_w2: np.ndarray | None = None
 
     @staticmethod
-    def make(rng: np.random.Generator, d: int = E2E_D) -> "TinyBlockWeights":
-        def w() -> np.ndarray:
-            return quant_weight_to_i8(rng.normal(0.0, 0.15, size=(d, d)))
+    def make(
+        rng: np.random.Generator, d: int = E2E_D, mlp_h: int | None = None
+    ) -> "TinyBlockWeights":
+        mh = int(mlp_h if mlp_h is not None else d)
+
+        def w(shape: tuple[int, int]) -> np.ndarray:
+            return quant_weight_to_i8(rng.normal(0.0, 0.15, size=shape))
 
         g = np.full(d, ONE_Q12, dtype=np.int32)
-        return TinyBlockWeights(w(), w(), w(), w(), w(), w(), g, g)
+        return TinyBlockWeights(
+            w((d, d)),
+            w((d, d)),
+            w((d, d)),
+            w((d, d)),
+            w((d, mh)),
+            w((mh, d)),
+            g,
+            g,
+        )
+
+    def scale_for(self, name: str, fallback: ScaleW) -> ScaleW:
+        sw = getattr(self, f"sw_{name}", None)
+        return fallback if sw is None else sw
 
 
-def _rmsnorm_rows(glue_or_none, x_q12: np.ndarray, gamma: np.ndarray, *, use_hw: bool) -> np.ndarray:
+def _float_rmsnorm_row(x_q12: np.ndarray, gamma_q12: np.ndarray, eps: float = 1e-5) -> np.ndarray:
+    x = from_q12(x_q12)
+    g = from_q12(gamma_q12)
+    rms = np.sqrt(np.mean(x * x, axis=-1, keepdims=True) + eps)
+    return to_q12((x / rms) * g)
+
+
+def _float_gelu_row(x_q12: np.ndarray) -> np.ndarray:
+    """Torch-default GELU (erf) → Q12."""
+    x = from_q12(x_q12)
+    # numpy has no erf on all platforms we care about; math.erf is fine at T×D.
+    erf = np.frompyfunc(math.erf, 1, 1)
+    y = 0.5 * x * (1.0 + erf(x / math.sqrt(2.0)).astype(np.float64))
+    return to_q12(y)
+
+
+def _float_softmax_row(scores_q12: np.ndarray) -> np.ndarray:
+    s = from_q12(scores_q12)
+    s = s - np.max(s)
+    e = np.exp(s)
+    return to_q16(e / np.sum(e))
+
+
+def _resolve_glue_mode(*, use_hw: bool, glue_mode: str | None) -> str:
+    """glue_mode: 'hw' | 'q12' | 'float'. Legacy use_hw selects hw vs q12 when unset."""
+    if glue_mode is not None:
+        mode = str(glue_mode)
+    else:
+        mode = "hw" if use_hw else "q12"
+    if mode not in ("hw", "q12", "float"):
+        raise ValueError(f"glue_mode must be hw|q12|float, got {mode!r}")
+    return mode
+
+
+def _rmsnorm_rows(
+    glue_or_none, x_q12: np.ndarray, gamma: np.ndarray, *, glue_mode: str
+) -> np.ndarray:
     """RMSNorm each token (row) of shape [T, D]."""
     out = np.empty_like(x_q12, dtype=np.int32)
     for t in range(x_q12.shape[0]):
-        if use_hw:
+        if glue_mode == "hw":
             out[t] = glue_or_none.run(OP_RMSNORM, x_q12[t], gamma=gamma, param=1)
+        elif glue_mode == "float":
+            out[t] = _float_rmsnorm_row(x_q12[t], gamma)
         else:
             out[t] = ref_rmsnorm(x_q12[t], gamma, 1)
     return out
 
 
-def _residual_rows(glue_or_none, x_q12: np.ndarray, y_q12: np.ndarray, *, use_hw: bool) -> np.ndarray:
+def _residual_rows(
+    glue_or_none, x_q12: np.ndarray, y_q12: np.ndarray, *, glue_mode: str
+) -> np.ndarray:
+    """Residual add. float mode still uses exact int32 add (same as q12)."""
     out = np.empty_like(x_q12, dtype=np.int32)
     for t in range(x_q12.shape[0]):
-        if use_hw:
+        if glue_mode == "hw":
             out[t] = glue_or_none.run(OP_RESIDUAL, x_q12[t], y=y_q12[t])
         else:
             out[t] = ref_residual(x_q12[t], y_q12[t])
     return out
 
 
-def _gelu_rows(glue_or_none, x_q12: np.ndarray, *, use_hw: bool) -> np.ndarray:
+def _gelu_rows(glue_or_none, x_q12: np.ndarray, *, glue_mode: str) -> np.ndarray:
     out = np.empty_like(x_q12, dtype=np.int32)
     for t in range(x_q12.shape[0]):
-        if use_hw:
+        if glue_mode == "hw":
             out[t] = glue_or_none.run(OP_GELU, x_q12[t])
+        elif glue_mode == "float":
+            out[t] = _float_gelu_row(x_q12[t])
         else:
             out[t] = ref_gelu(x_q12[t])
     return out
 
 
-def _softmax_rows(glue_or_none, scores_q12: np.ndarray, *, use_hw: bool) -> np.ndarray:
+def _softmax_rows(glue_or_none, scores_q12: np.ndarray, *, glue_mode: str) -> np.ndarray:
     """Softmax each row → Q16, scores [T, T]."""
     out = np.empty_like(scores_q12, dtype=np.int32)
     for t in range(scores_q12.shape[0]):
-        if use_hw:
+        if glue_mode == "hw":
             out[t] = glue_or_none.run(OP_SOFTMAX, scores_q12[t])
+        elif glue_mode == "float":
+            out[t] = _float_softmax_row(scores_q12[t])
         else:
             out[t] = ref_softmax(scores_q12[t])
     return out
@@ -341,15 +442,16 @@ def _matmul_q12(
     transport=None,
     use_hw: bool,
     scale_act: float = SCALE_ACT,
-    scale_w: float = SCALE_W,
+    scale_w: ScaleW = SCALE_W,
 ) -> np.ndarray:
     """A(Q12) @ W(int8) via quant(A)*W → dequant Q12."""
     a_i8 = quant_q12_to_i8(a_q12, scale_act)
+    inv_w = _inv_scale_w(scale_w)
     if use_hw:
         from npukit_matmul import npu_matmul
 
         c_i32, _ = npu_matmul(mmio, transport, a_i8, b_i8)
-        return dequant_gemm_to_q12(c_i32, 1.0 / scale_act, 1.0 / scale_w)
+        return dequant_gemm_to_q12(c_i32, 1.0 / scale_act, inv_w)
     return gemm_i8_to_q12(a_i8, b_i8, a_scale=scale_act, b_scale=scale_w)
 
 
@@ -361,38 +463,57 @@ def transformer_block_1layer(
     mmio=None,
     transport=None,
     use_hw: bool = False,
+    use_hw_gemm: bool | None = None,
+    glue_mode: str | None = None,
     verbose: bool = True,
     scale_act: float = SCALE_ACT,
-    scale_w: float = SCALE_W,
+    scale_w: ScaleW = SCALE_W,
     scale_p: float = SCALE_P,
 ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     """One pre-norm transformer block: attn + FFN. Shapes [T,D] Q12 in/out.
 
-    Intermediates dict always filled for notebook dumps. use_hw requires glue+mmio+transport.
+    GEMM may run on NPU (use_hw_gemm). Softmax/RMSNorm/GELU follow glue_mode:
+      'hw' | 'q12' (LUT refs) | 'float' (A9 float32, preferred for ViT deploy).
+    Legacy use_hw=True ⇒ GEMM+glue HW when glue_mode / use_hw_gemm unset.
     """
     x_q12 = np.asarray(x_q12, dtype=np.int32)
     t, d = x_q12.shape
-    # Softmax length=T; residual/GELU/RMSNorm length=D — both ≤ MAX_LEN.
+    mlp_h = int(w.w1.shape[1])
+    gmode = _resolve_glue_mode(use_hw=use_hw, glue_mode=glue_mode)
+    gemm_hw = bool(use_hw if use_hw_gemm is None else use_hw_gemm)
+    # Softmax length=T ≤ MAX_LEN; model dim D for residual/RMSNorm.
     assert t <= MAX_LEN and d <= MAX_LEN and d % 8 == 0 and t % 8 == 0
+    assert w.w1.shape == (d, mlp_h) and w.w2.shape == (mlp_h, d)
+    if gmode == "hw" and mlp_h > MAX_LEN:
+        raise ValueError(
+            f"FFN hidden {mlp_h} > MAX_LEN={MAX_LEN}; use glue_mode='float'"
+        )
 
     dump: dict[str, np.ndarray] = {"x_in": x_q12.copy()}
-    mm = dict(mmio=mmio, transport=transport, use_hw=use_hw,
-              scale_act=scale_act, scale_w=scale_w)
+
+    def mm(name: str) -> dict:
+        return dict(
+            mmio=mmio,
+            transport=transport,
+            use_hw=gemm_hw,
+            scale_act=scale_act,
+            scale_w=w.scale_for(name, scale_w),
+        )
 
     # --- attention ---
-    x_n = _rmsnorm_rows(glue, x_q12, w.gamma1, use_hw=use_hw)
+    x_n = _rmsnorm_rows(glue, x_q12, w.gamma1, glue_mode=gmode)
     dump["attn_in_norm"] = x_n.copy()
 
-    q = _matmul_q12(x_n, w.wq, **mm)
-    k = _matmul_q12(x_n, w.wk, **mm)
-    v = _matmul_q12(x_n, w.wv, **mm)
+    q = _matmul_q12(x_n, w.wq, **mm("wq"))
+    k = _matmul_q12(x_n, w.wk, **mm("wk"))
+    v = _matmul_q12(x_n, w.wv, **mm("wv"))
     dump["q"], dump["k"], dump["v"] = q.copy(), k.copy(), v.copy()
 
     # scores = (Q @ K^T) / sqrt(D)  — GEMM on int8 quant of Q and K^T
     k_t = np.ascontiguousarray(k.T)
     q_i8 = quant_q12_to_i8(q, scale_act)
     k_t_i8 = quant_q12_to_i8(k_t, scale_act)
-    if use_hw:
+    if gemm_hw:
         from npukit_matmul import npu_matmul
 
         scores_i32, _ = npu_matmul(mmio, transport, q_i8, k_t_i8)
@@ -404,12 +525,12 @@ def transformer_block_1layer(
     scores = ((scores.astype(np.int64) * int(inv_sqrt)) >> Q12).astype(np.int32)
     dump["scores"] = scores.copy()
 
-    p = _softmax_rows(glue, scores, use_hw=use_hw)
+    p = _softmax_rows(glue, scores, glue_mode=gmode)
     dump["attn_p"] = p.copy()
 
     p_i8 = quant_q16_to_i8(p, scale_p)
     v_i8 = quant_q12_to_i8(v, scale_act)
-    if use_hw:
+    if gemm_hw:
         from npukit_matmul import npu_matmul
 
         attn_i32, _ = npu_matmul(mmio, transport, p_i8, v_i8)
@@ -418,22 +539,22 @@ def transformer_block_1layer(
         attn = gemm_i8_to_q12(p_i8, v_i8, a_scale=scale_p, b_scale=scale_act)
     dump["attn"] = attn.copy()
 
-    attn_o = _matmul_q12(attn, w.wo, **mm)
+    attn_o = _matmul_q12(attn, w.wo, **mm("wo"))
     dump["attn_proj"] = attn_o.copy()
 
-    x2 = _residual_rows(glue, x_q12, attn_o, use_hw=use_hw)
+    x2 = _residual_rows(glue, x_q12, attn_o, glue_mode=gmode)
     dump["after_attn_res"] = x2.copy()
 
     # --- FFN ---
-    x_n2 = _rmsnorm_rows(glue, x2, w.gamma2, use_hw=use_hw)
+    x_n2 = _rmsnorm_rows(glue, x2, w.gamma2, glue_mode=gmode)
     dump["ffn_in_norm"] = x_n2.copy()
-    h = _matmul_q12(x_n2, w.w1, **mm)
+    h = _matmul_q12(x_n2, w.w1, **mm("w1"))
     dump["ffn_h"] = h.copy()
-    h = _gelu_rows(glue, h, use_hw=use_hw)
+    h = _gelu_rows(glue, h, glue_mode=gmode)
     dump["ffn_gelu"] = h.copy()
-    h = _matmul_q12(h, w.w2, **mm)
+    h = _matmul_q12(h, w.w2, **mm("w2"))
     dump["ffn_out"] = h.copy()
-    y = _residual_rows(glue, x2, h, use_hw=use_hw)
+    y = _residual_rows(glue, x2, h, glue_mode=gmode)
     dump["y_out"] = y.copy()
 
     if verbose:

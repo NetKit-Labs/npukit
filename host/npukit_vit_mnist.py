@@ -3,16 +3,15 @@
 
 Geometry (T=16, no resize):
   - Native 28×28 MNIST
-  - Patch size 7 → T=16 tokens (4×4 grid)
-  - Patch vector 7×7=49 zero-padded to 56 (GEMM 8-alignment)
-  - Model dim D=16 (glue MAX_LEN=16; GEMM host-tiles 8×8)
-  - N_LAYERS=2 transformer blocks (host-scheduled on the same GEMM+glue)
+  - **CPU DS-stem** (richer tiny DS) → T=16 tokens × D=16
+  - Model dim D=16, FFN hidden VIT_MLP (GEMM host-tiles 8×8)
+  - N_LAYERS transformer blocks (host-scheduled on the same GEMM)
 
 Split:
-  - CPU: patchify, pad, position add, mean-pool, class head (10-way; not 8-aligned)
-  - FPGA: patch-projection GEMM, 2× transformer block (GEMM + glue, time-multiplexed)
+  - CPU / TFLite+XNNPACK: DS-stem, pos add, Softmax/RMSNorm/GELU (float), head
+  - FPGA: int8 GEMM (QKV / scores / P@V / FFN); optional HW glue
 
-Requires glue bitstream with len==MAX_LEN fix (Softmax length 16).
+Legacy non-stem patch embed (7×7 patches → GEMM) still loads if npz has no stem_*.
 
 Train:
   python3 host/train_vit_mnist.py
@@ -28,24 +27,40 @@ from pathlib import Path
 import numpy as np
 
 import npukit_transformer as nt
+import vit_ds_stem as stemmod
 
 _HOST_DIR = Path(__file__).resolve().parent
 DEFAULT_WEIGHTS = _HOST_DIR / "vit_mnist_weights.npz"
 DEFAULT_SAMPLE = _HOST_DIR / "mnist_sample.npz"
+DEFAULT_STEM_TFLITE = _HOST_DIR / "vit_mnist_stem.tflite"
 
 # --- ViT-MNIST geometry (host contract) ---
 IMG = 28
-PATCH = 7
-VIT_T = (IMG // PATCH) * (IMG // PATCH)  # 16
+PATCH = 7  # legacy patch path only
+VIT_T = 16
 VIT_D = 16
-N_LAYERS = 2
-PATCH_DIM_RAW = PATCH * PATCH  # 49
-PATCH_DIM = ((PATCH_DIM_RAW + 7) // 8) * 8  # 56 — pad for 8×8 GEMM tiles
+VIT_MLP = 32  # FFN hidden; needs glue_mode='float' ( > MAX_LEN)
+N_LAYERS = 4  # stem + deeper body; still MCU-tiny
+PATCH_DIM_RAW = PATCH * PATCH  # 49 (legacy)
+PATCH_DIM = ((PATCH_DIM_RAW + 7) // 8) * 8  # 56 — legacy GEMM pad
 N_CLASS = 10
+USE_STEM = True
+# Deploy default: int8 GEMM (+ optional NPU) with A9 float Softmax/RMSNorm/GELU.
+DEFAULT_GLUE_MODE = "float"
 
 assert VIT_T <= nt.MAX_LEN and VIT_T % 8 == 0
 assert VIT_D <= nt.MAX_LEN and VIT_D % 8 == 0 and PATCH_DIM % 8 == 0
+assert VIT_MLP % 8 == 0
 assert N_LAYERS >= 1
+
+
+def _load_sw(data, key: str, n: int, fallback: float) -> np.ndarray | None:
+    if key in data.files:
+        arr = np.asarray(data[key], dtype=np.float64).reshape(-1)
+        if arr.size == 1:
+            return np.full(n, float(arr[0]), dtype=np.float64)
+        return arr
+    return np.full(n, float(fallback), dtype=np.float64)
 
 
 def _block_from_npz(data, layer: int | None) -> nt.TinyBlockWeights:
@@ -54,24 +69,42 @@ def _block_from_npz(data, layer: int | None) -> nt.TinyBlockWeights:
     def k(base: str) -> str:
         return base if layer is None else f"{base}{layer}"
 
+    wq = np.asarray(data[k("wq")], dtype=np.int8)
+    w1 = np.asarray(data[k("w1")], dtype=np.int8)
+    d, mlp_h = int(wq.shape[1]), int(w1.shape[1])
+    prefix = "scale_block0" if layer is None else f"scale_block{layer}"
+    leg_w = float(data["scale_w"][0]) if "scale_w" in data.files else nt.SCALE_W
+    stage_w = (
+        float(data[f"{prefix}_w"][0]) if f"{prefix}_w" in data.files else leg_w
+    )
     return nt.TinyBlockWeights(
-        wq=np.asarray(data[k("wq")], dtype=np.int8),
+        wq=wq,
         wk=np.asarray(data[k("wk")], dtype=np.int8),
         wv=np.asarray(data[k("wv")], dtype=np.int8),
         wo=np.asarray(data[k("wo")], dtype=np.int8),
-        w1=np.asarray(data[k("w1")], dtype=np.int8),
+        w1=w1,
         w2=np.asarray(data[k("w2")], dtype=np.int8),
         gamma1=np.asarray(data[k("gamma1")], dtype=np.int32),
         gamma2=np.asarray(data[k("gamma2")], dtype=np.int32),
+        sw_wq=_load_sw(data, f"{prefix}_wq_w", d, stage_w),
+        sw_wk=_load_sw(data, f"{prefix}_wk_w", d, stage_w),
+        sw_wv=_load_sw(data, f"{prefix}_wv_w", d, stage_w),
+        sw_wo=_load_sw(data, f"{prefix}_wo_w", d, stage_w),
+        sw_w1=_load_sw(data, f"{prefix}_w1_w", mlp_h, stage_w),
+        sw_w2=_load_sw(data, f"{prefix}_w2_w", d, stage_w),
     )
 
 
 @dataclass(frozen=True)
 class QuantScales:
-    """int8 quant scales for one stage (embed / block / cls)."""
+    """int8 quant scales for one stage (embed / block / cls).
+
+    `w` may be a per-output-channel vector (cls / legacy embed) or a scalar
+    mean used as fallback when per-matrix scales live on TinyBlockWeights.
+    """
 
     act: float = nt.SCALE_ACT
-    w: float = nt.SCALE_W
+    w: float | np.ndarray = nt.SCALE_W
     p: float = nt.SCALE_P  # attention probs; unused for embed/cls
 
 
@@ -81,19 +114,20 @@ def _default_scales(n: int) -> tuple[QuantScales, ...]:
 
 @dataclass
 class VitMnistWeights:
-    """Patch embed + N_LAYERS blocks + linear head (int8 / Q12).
+    """Optional DS-stem + N blocks + linear head (int8 / Q12).
 
-    Scales are per-stage: embed, each transformer block, class head.
-    (Per-head scales come later when multi-head attention is added.)
+    Scales are per-stage: embed (legacy), each transformer block, class head.
+    When `stem` is set, CPU/TFLite stem produces tokens (no patch GEMM).
     """
 
-    w_pe: np.ndarray  # [PATCH_DIM, D] int8  (padded patch dim)
+    w_pe: np.ndarray  # [PATCH_DIM, D] int8  (legacy patch path; unused with stem)
     pos: np.ndarray  # [T, D] Q12
     blocks: tuple[nt.TinyBlockWeights, ...]
     w_cls: np.ndarray  # [D, N_CLASS] int8
     scale_embed: QuantScales = field(default_factory=QuantScales)
     scale_blocks: tuple[QuantScales, ...] = field(default_factory=tuple)
     scale_cls: QuantScales = field(default_factory=QuantScales)
+    stem: stemmod.StemInt8 | None = None
 
     def __post_init__(self) -> None:
         if not self.scale_blocks:
@@ -122,7 +156,9 @@ class VitMnistWeights:
     def make(rng: np.random.Generator) -> "VitMnistWeights":
         w_pe = nt.quant_weight_to_i8(rng.normal(0.0, 0.12, size=(PATCH_DIM, VIT_D)))
         pos = nt.to_q12(rng.normal(0.0, 0.05, size=(VIT_T, VIT_D)))
-        blocks = tuple(nt.TinyBlockWeights.make(rng, VIT_D) for _ in range(N_LAYERS))
+        blocks = tuple(
+            nt.TinyBlockWeights.make(rng, VIT_D, mlp_h=VIT_MLP) for _ in range(N_LAYERS)
+        )
         w_cls = nt.quant_weight_to_i8(rng.normal(0.0, 0.12, size=(VIT_D, N_CLASS)))
         return VitMnistWeights(
             w_pe=w_pe,
@@ -144,20 +180,31 @@ class VitMnistWeights:
             blocks = tuple(_block_from_npz(data, i) for i in range(n_layers))
         else:
             blocks = (_block_from_npz(data, None),)
-        if len(blocks) < N_LAYERS:
-            raise ValueError(
-                f"{path} has {len(blocks)} layer(s); need {N_LAYERS}. Re-run train_vit_mnist.py"
-            )
-        blocks = blocks[:N_LAYERS]
+        if len(blocks) < 1:
+            raise ValueError(f"{path} has no transformer layers")
 
         # Legacy global scales → broadcast; prefer per-stage keys when present.
         leg_a = float(data["scale_act"][0]) if "scale_act" in data.files else nt.SCALE_ACT
         leg_w = float(data["scale_w"][0]) if "scale_w" in data.files else nt.SCALE_W
         leg_p = float(data["scale_p"][0]) if "scale_p" in data.files else nt.SCALE_P
 
-        def _sc(prefix: str, *, need_p: bool) -> QuantScales:
+        def _sc(prefix: str, *, need_p: bool, w_len: int | None = None) -> QuantScales:
             a = float(data[f"{prefix}_act"][0]) if f"{prefix}_act" in data.files else leg_a
-            w = float(data[f"{prefix}_w"][0]) if f"{prefix}_w" in data.files else leg_w
+            if f"{prefix}_w_ch" in data.files:
+                w = np.asarray(data[f"{prefix}_w_ch"], dtype=np.float64).reshape(-1)
+            elif f"{prefix}_w" in data.files:
+                raw = np.asarray(data[f"{prefix}_w"], dtype=np.float64).reshape(-1)
+                w = (
+                    np.full(w_len, float(raw[0]), dtype=np.float64)
+                    if w_len is not None and raw.size == 1
+                    else (float(raw[0]) if raw.size == 1 else raw)
+                )
+            else:
+                w = (
+                    np.full(w_len, leg_w, dtype=np.float64)
+                    if w_len is not None
+                    else leg_w
+                )
             p = (
                 float(data[f"{prefix}_p"][0])
                 if f"{prefix}_p" in data.files
@@ -170,12 +217,15 @@ class VitMnistWeights:
             scale_blocks = tuple(
                 _sc(f"scale_block{i}", need_p=True) for i in range(len(blocks))
             )
-            scale_cls = _sc("scale_cls", need_p=False)
+            scale_cls = _sc("scale_cls", need_p=False, w_len=N_CLASS)
         else:
             scale_embed = QuantScales(act=leg_a, w=leg_w)
             scale_blocks = tuple(QuantScales(act=leg_a, w=leg_w, p=leg_p) for _ in blocks)
-            scale_cls = QuantScales(act=leg_a, w=leg_w)
+            scale_cls = QuantScales(
+                act=leg_a, w=np.full(N_CLASS, leg_w, dtype=np.float64)
+            )
 
+        stem = stemmod.StemInt8.from_npz(data)
         return VitMnistWeights(
             w_pe=np.asarray(data["w_pe"], dtype=np.int8),
             pos=np.asarray(data["pos"], dtype=np.int32),
@@ -184,6 +234,7 @@ class VitMnistWeights:
             scale_embed=scale_embed,
             scale_blocks=scale_blocks,
             scale_cls=scale_cls,
+            stem=stem,
         )
 
 
@@ -274,6 +325,7 @@ def embed_patches_q12(
     mmio=None,
     transport=None,
     use_hw: bool,
+    glue_mode: str | None = None,
 ) -> np.ndarray:
     """Patch linear (GEMM) + position residual (glue if HW)."""
     x_q12 = nt.to_q12(np.asarray(patches, dtype=np.float64))
@@ -286,7 +338,8 @@ def embed_patches_q12(
         scale_act=w.scale_embed.act,
         scale_w=w.scale_embed.w,
     )
-    return nt._residual_rows(glue, tokens, w.pos, use_hw=use_hw)
+    gmode = nt._resolve_glue_mode(use_hw=use_hw, glue_mode=glue_mode)
+    return nt._residual_rows(glue, tokens, w.pos, glue_mode=gmode)
 
 
 def classify_tokens_cpu(tokens_q12: np.ndarray, w: VitMnistWeights) -> np.ndarray:
@@ -298,6 +351,37 @@ def classify_tokens_cpu(tokens_q12: np.ndarray, w: VitMnistWeights) -> np.ndarra
     ).reshape(-1)
 
 
+def _stem_tokens_float(
+    img: np.ndarray,
+    w: VitMnistWeights,
+    *,
+    use_tflite: bool | None,
+) -> np.ndarray:
+    """CPU stem → float tokens [T,D]. TFLite+XNNPACK when available/requested."""
+    assert w.stem is not None
+    auto = use_tflite is None
+    want = bool(use_tflite) or (
+        auto and DEFAULT_STEM_TFLITE.exists() and _prefer_tflite_stem()
+    )
+    if want and DEFAULT_STEM_TFLITE.exists():
+        try:
+            return stemmod.stem_forward_tflite(img, DEFAULT_STEM_TFLITE)
+        except Exception:
+            if use_tflite:
+                raise
+    return stemmod.stem_forward_numpy(img, w.stem, qat=True)
+
+
+def _prefer_tflite_stem() -> bool:
+    """Prefer TFLite stem on ARM A9 hosts."""
+    try:
+        import platform
+
+        return platform.machine().startswith(("arm", "aarch"))
+    except Exception:
+        return False
+
+
 def vit_forward(
     img28: np.ndarray,
     w: VitMnistWeights,
@@ -306,18 +390,43 @@ def vit_forward(
     mmio=None,
     transport=None,
     use_hw: bool = False,
+    use_hw_gemm: bool | None = None,
+    glue_mode: str | None = None,
     verbose: bool = False,
+    use_tflite_stem: bool | None = None,
 ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-    """One image → logits Q12 [10] + dump."""
+    """One image → logits Q12 [10] + dump.
+
+    Default deploy glue is A9 float Softmax/RMSNorm/GELU (DEFAULT_GLUE_MODE).
+    Set glue_mode='hw' to exercise FPGA glue (requires mlp_h ≤ MAX_LEN).
+    """
     img = np.asarray(img28, dtype=np.float64)
     assert img.shape == (IMG, IMG)
-    raw = patchify(img, PATCH)
-    patches = pad_patches(raw)
-    dump: dict[str, np.ndarray] = {"img28": img, "patches_raw": raw, "patches": patches}
+    dump: dict[str, np.ndarray] = {"img28": img}
+    gmode = DEFAULT_GLUE_MODE if glue_mode is None else glue_mode
+    gemm_hw = bool(use_hw if use_hw_gemm is None else use_hw_gemm)
 
-    tokens = embed_patches_q12(
-        patches, w, glue=glue, mmio=mmio, transport=transport, use_hw=use_hw
-    )
+    if w.stem is not None and USE_STEM:
+        tok_f = _stem_tokens_float(img, w, use_tflite=use_tflite_stem)
+        dump["stem_tokens"] = tok_f.copy()
+        tokens = nt.to_q12(tok_f.astype(np.float64))
+        tokens = nt._residual_rows(
+            glue, tokens, w.pos, glue_mode=nt._resolve_glue_mode(use_hw=False, glue_mode=gmode)
+        )
+    else:
+        raw = patchify(img, PATCH)
+        patches = pad_patches(raw)
+        dump["patches_raw"] = raw
+        dump["patches"] = patches
+        tokens = embed_patches_q12(
+            patches,
+            w,
+            glue=glue,
+            mmio=mmio,
+            transport=transport,
+            use_hw=gemm_hw,
+            glue_mode=gmode,
+        )
     dump["tokens"] = tokens.copy()
 
     y = tokens
@@ -329,7 +438,9 @@ def vit_forward(
             glue=glue,
             mmio=mmio,
             transport=transport,
-            use_hw=use_hw,
+            use_hw=False,
+            use_hw_gemm=gemm_hw,
+            glue_mode=gmode,
             verbose=verbose,
             scale_act=sc.act,
             scale_w=sc.w,
@@ -374,15 +485,21 @@ def run_vit_smoke(
 
     print("=== MNIST tiny-ViT smoke ===")
     print(
-        f"IMG={IMG} PATCH={PATCH} T={VIT_T} D={VIT_D} layers={N_LAYERS} "
+        f"IMG={IMG} PATCH={PATCH} T={VIT_T} D={VIT_D} mlp={VIT_MLP} "
+        f"layers={N_LAYERS} glue={DEFAULT_GLUE_MODE} "
         f"patch_dim={PATCH_DIM_RAW}->pad{PATCH_DIM} classes={N_CLASS}"
     )
+    def _wfmt(sw) -> str:
+        arr = np.asarray(sw, dtype=np.float64).reshape(-1)
+        return f"{float(arr.mean()):.2f}" if arr.size else "nan"
+
     print(
-        f"scales embed act/w={w.scale_embed.act:.2f}/{w.scale_embed.w:.2f}  "
+        f"scales embed act/w={w.scale_embed.act:.2f}/{_wfmt(w.scale_embed.w)}  "
         + " ".join(
-            f"L{i}={s.act:.1f}/{s.w:.1f}/{s.p:.1f}" for i, s in enumerate(w.scale_blocks)
+            f"L{i}={s.act:.1f}/{_wfmt(s.w)}/{s.p:.1f}"
+            for i, s in enumerate(w.scale_blocks)
         )
-        + f"  cls={w.scale_cls.act:.2f}/{w.scale_cls.w:.2f}"
+        + f"  cls={w.scale_cls.act:.2f}/{_wfmt(w.scale_cls.w)}"
     )
     print(f"weights={wsrc}")
 
@@ -406,8 +523,11 @@ def run_vit_smoke(
     n_pred_match = 0
     for i in range(n):
         print(f"\n--- image[{i}] label={int(labels[i])} ---")
+        # Numpy int8 stem (not TFLite): A9 tflite_runtime can SIGILL on invoke().
         print("--- ref ---")
-        logits_ref, dump_ref = vit_forward(imgs[i], w, use_hw=False, verbose=verbose)
+        logits_ref, dump_ref = vit_forward(
+            imgs[i], w, use_hw=False, verbose=verbose, use_tflite_stem=False
+        )
         pred_ref = int(dump_ref["pred"][0])
         n_correct_ref += int(pred_ref == int(labels[i]))
         print(f"ref pred={pred_ref} logits_q12[:4]={logits_ref[:4].tolist()}")
@@ -424,6 +544,7 @@ def run_vit_smoke(
             transport=transport,
             use_hw=True,
             verbose=verbose,
+            use_tflite_stem=False,
         )
         pred_hw = int(dump_hw["pred"][0])
         n_correct_hw += int(pred_hw == int(labels[i]))
