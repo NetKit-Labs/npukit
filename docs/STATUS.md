@@ -23,6 +23,7 @@ Fabric clock: **PS FCLK0 @ 100 MHz**. Latest rebuild closed timing (**WNS ≈ +0
 | `host/npukit_transformer_e2e.ipynb` | Synthetic 1-layer block, T=8×D=8, fixed scales | **ALL E2E PASS** (ref + board) |
 | `host/npukit_vit_mnist.ipynb` | MNIST tiny-ViT T=16×D=16×L=2, deploy-faithful QAT | **ALL VIT PASS** |
 | `host/dscnn_mnist.ipynb` | Host-only DS-CNN MNIST reference (not on FPGA) | float **98.00%** / int8 **98.39%** |
+| `host/npukit_board_smoke.ipynb` | One-shot matmul → glue → e2e → ViT | **ALL SMOKE PASS** |
 
 CLI on the board (same bit):
 
@@ -62,12 +63,12 @@ Example calibrated scales (order-of-magnitude; see npz): embed act/w ≈ 72/336,
 
 Two **deployment-shaped** peers on the same MNIST task — not a param-matched bake-off:
 
-| Role | Model | What it mimics |
-|------|--------|----------------|
-| **MCU-class CNN** | Host DS-CNN (int8) | TinyML depthwise-separable CNN you’d run on a Cortex-M / TFLite Micro–class MCU (DW/PW, GAP, small FC; ~8 KiB int8 weights) |
-| **MCU/MPU + accelerator ViT** | Tiny-ViT on NpuKit | Micro transformer the MCU/MPU *schedules*, with GEMM + glue on the FPGA fabric (T=16×D=16×L=2; ~4 KiB weights) |
+| Role | Model | What it mimics | Headline |
+|------|--------|----------------|----------|
+| **MCU-class CNN** | Host DS-CNN (int8) | TinyML DW/PW CNN on Cortex-M / TFLite Micro–class MCU | **98.39%** / ~**8.3 KiB** |
+| **MCU/MPU + accelerator ViT** | Tiny-ViT on NpuKit | Micro transformer scheduled on GEMM + glue (T=16×D=16×L=2) | **94.28%** / ~**4.3 KiB** |
 
-Do **not** force equal layer counts or equal params: a real MCU DS-CNN and a real accelerator-backed tiny ViT are different products. Compare **task accuracy + weight footprint + where compute runs**.
+Do **not** force equal layer counts or equal params. Compare **task accuracy + weight footprint + where compute runs** (CNN = host MCU-shaped; ViT = FPGA path). Full bring-up: `host/npukit_board_smoke.py` / `.ipynb`.
 
 ## DS-CNN host reference (MCU-class peer)
 

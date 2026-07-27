@@ -1,8 +1,10 @@
 # NpuKit
 
-FPGA NPU kit for the [PYNQ-Z2](https://www.tulembedded.com/FPGA/ProductsPYNQ-Z2.html) (Xilinx Zynq-7020): an **8×8 int8 output-stationary systolic array** with AXI4-Lite control and AXI DMA data movement from the Zynq PS.
+FPGA mini-NPU for the [PYNQ-Z2](https://www.tulembedded.com/FPGA/ProductsPYNQ-Z2.html) (Xilinx **Zynq-7020**): an **8×8 int8** output-stationary **systolic GEMM** (AXI4-Lite + AXI DMA) plus **transformer glue** (residual / GELU / RMSNorm / Softmax, `MAX_LEN=16`, 100 MHz). The Zynq A9 host tiles matmuls, runs quant/scales, and schedules a deploy-quantized **tiny Vision Transformer** on MNIST (~**94%**); a host **MCU-class DS-CNN** peer (~**98%** int8) sits beside it for edge compare.
 
-Part of [NetKit Labs](https://github.com/NetKit-Labs) — companion direction to [netkit](https://github.com/NetKit-Labs/netkit) (embedded NN inference on MCU/MPU), focused here on **custom FPGA acceleration**.
+Part of [NetKit Labs](https://github.com/NetKit-Labs) — companion to [netkit](https://github.com/NetKit-Labs/netkit) (MCU/MPU inference), focused here on **custom FPGA acceleration** for edge transformers.
+
+**Keywords:** FPGA · PYNQ-Z2 · Zynq-7020 · systolic array · int8 GEMM · NPU · AXI DMA · transformer · ViT · MNIST · TinyML · QAT · DS-CNN · edge AI
 
 ## Where we are
 
@@ -24,8 +26,20 @@ Part of [NetKit Labs](https://github.com/NetKit-Labs) — companion direction to
 | yes | E2E 1-layer smoke T=8×D=8 + fixed scales — `host/npukit_transformer_e2e.ipynb` (**ALL E2E PASS**) |
 | yes | MNIST tiny-ViT T=16×D=16×L=2 + per-stage scales + deploy-faithful QAT (~**94%** numpy/full test; board **ALL VIT PASS**) |
 | yes | Host MCU-class DS-CNN MNIST peer (int8 ~**98.4%** / ~8 KiB; vs MCU+NpuKit tiny-ViT ~**94%** / ~4 KiB) |
+| yes | Full board smoke: `host/npukit_board_smoke.py` + `.ipynb` (matmul → glue → e2e → ViT) |
 
 Status write-up (results + next path): **[`docs/STATUS.md`](docs/STATUS.md)**.
+
+## Edge peers (MCU vs MCU+accelerator)
+
+Same MNIST task, two **deployment-shaped** models — not a param-matched bake-off:
+
+| Peer | Role | Headline |
+|------|------|----------|
+| **DS-CNN** (`host/dscnn_mnist*.py`) | TinyML CNN you’d run on a Cortex-M / TFLite Micro–class MCU | int8 **~98.4%** / ~**8.3 KiB** (host; not on FPGA) |
+| **Tiny-ViT** (`host/npukit_vit_mnist*.py`) | Micro transformer the MCU/MPU *schedules* on NpuKit GEMM+glue | deploy-quant **~94.3%** / ~**4.3 KiB** (board **ALL VIT PASS**) |
+
+Compare **accuracy + weight KiB + where compute runs**. Details: [`docs/STATUS.md`](docs/STATUS.md).
 
 ## Hierarchy
 
@@ -112,6 +126,14 @@ python /home/xilinx/jupyter_notebooks/npukit_matmul.py \
   /home/xilinx/jupyter_notebooks/npukit.bit 32 32 32
 ```
 
+**Full board smoke** (matmul → glue → e2e → ViT in one shot):
+
+```bash
+python /home/xilinx/jupyter_notebooks/npukit_board_smoke.py \
+  /home/xilinx/jupyter_notebooks/npukit.bit --vit-n 64
+# or open npukit_board_smoke.ipynb, Run All, then save
+```
+
 **Jupyter:** open `npukit_matmul.ipynb` and run all cells. The notebook is an interactive wrapper around `npukit_matmul.py` (classic 8×8 suite + tiled MxKxN). Matrix data is always built in Python (e.g. `classic_8x8_cases()` / `tiled_cases()`), never loaded from the `.bit`. A checked-in board run on PYNQ-Z2 (DMA transport) shows **12/12 PASS**, including tiled **16×16** and **32×32×32**, with verbose A/B/C dumps left in the cell outputs.
 
 **PS ↔ PL paths (keep both):**
@@ -160,7 +182,7 @@ python3 viz/systolic_anim.py          # Pillow GIF → viz/out/systolic_8x8.gif
 npukit/
   rtl/           pe, systolic_array, npukit_glue, npukit_axil, npukit_top, npukit_pl
   sim/           pe_tb, systolic_array_tb, npukit_axil_tb, npukit_glue_tb
-  host/          matmul / transformer / e2e / vit_mnist (+ train_vit_mnist.py, weights.npz)
+  host/          matmul / transformer / e2e / vit_mnist / board_smoke / dscnn (+ train_*.py, weights)
   docs/          STATUS.md, tiling.md, transformer_glue.md, transformer_split.md, glue_bringup.md
   viz/           animation scripts
   constraints/   pynq_z2.xdc (btn/led; clock from PS FCLK0)
