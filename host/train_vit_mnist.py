@@ -227,7 +227,8 @@ class TinyViT(nn.Module):
         t = vit.VIT_T
         mh = vit.VIT_MLP
         self.n_layers = int(n_layers if n_layers is not None else vit.N_LAYERS)
-        self.stem = stemmod.TinyDSStem(d)
+        mid = stemmod.STEM_MID
+        self.stem = stemmod.TinyDSStem(d, mid=mid)
         # legacy placeholder so old export keys still exist
         self.w_pe = nn.Parameter(torch.randn(vit.PATCH_DIM, d) * 0.02)
         self.pos = nn.Parameter(torch.zeros(t, d))
@@ -249,13 +250,17 @@ class TinyViT(nn.Module):
             "pw": 127.0,
             "dw2": 127.0,
             "pw2": 127.0,
+            "dw3": 127.0,
+            "pw3": 127.0,
         }
         self.stem_w_scales: dict[str, torch.Tensor] = {
-            "stem": torch.full((d,), 127.0),
-            "dw": torch.full((d,), 127.0),
-            "pw": torch.full((d,), 127.0),
-            "dw2": torch.full((d,), 127.0),
-            "pw2": torch.full((d,), 127.0),
+            "stem": torch.full((mid,), 127.0),
+            "dw": torch.full((mid,), 127.0),
+            "pw": torch.full((mid,), 127.0),
+            "dw2": torch.full((mid,), 127.0),
+            "pw2": torch.full((mid,), 127.0),
+            "dw3": torch.full((mid,), 127.0),
+            "pw3": torch.full((d,), 127.0),
         }
 
     @property
@@ -338,6 +343,12 @@ class TinyViT(nn.Module):
         )
         x = self._stem_conv(
             x, self.stem.pw2, sa=sa["dw2"], sw=sw["pw2"], qat=qat
+        )
+        x = self._stem_conv(
+            x, self.stem.dw3, sa=sa["pw2"], sw=sw["dw3"], qat=qat
+        )
+        x = self._stem_conv(
+            x, self.stem.pw3, sa=sa["dw3"], sw=sw["pw3"], qat=qat
         )
         x = F.pad(x, (0, 1, 0, 1))
         x = F.avg_pool2d(x, kernel_size=2, stride=2)
@@ -454,6 +465,8 @@ def calibrate_scales(
     stem_a_pw: list[torch.Tensor] = []
     stem_a_dw2: list[torch.Tensor] = []
     stem_a_pw2: list[torch.Tensor] = []
+    stem_a_dw3: list[torch.Tensor] = []
+    stem_a_pw3: list[torch.Tensor] = []
     n = 0
     for xb, _ in loader:
         xb = xb.to(device)
@@ -469,6 +482,10 @@ def calibrate_scales(
         stem_a_dw2.append(h.detach().abs().reshape(-1))
         h = F.relu(model.stem.pw2(h), inplace=False)
         stem_a_pw2.append(h.detach().abs().reshape(-1))
+        h = F.relu(model.stem.dw3(h), inplace=False)
+        stem_a_dw3.append(h.detach().abs().reshape(-1))
+        h = F.relu(model.stem.pw3(h), inplace=False)
+        stem_a_pw3.append(h.detach().abs().reshape(-1))
         h = F.pad(h, (0, 1, 0, 1))
         h = F.avg_pool2d(h, kernel_size=2, stride=2)
         tok = h.flatten(2).transpose(1, 2).contiguous()
@@ -528,6 +545,8 @@ def calibrate_scales(
         "pw": _scale_from_max(pct_max(stem_a_pw), lo=8.0, hi=512.0),
         "dw2": _scale_from_max(pct_max(stem_a_dw2), lo=8.0, hi=512.0),
         "pw2": _scale_from_max(pct_max(stem_a_pw2), lo=8.0, hi=512.0),
+        "dw3": _scale_from_max(pct_max(stem_a_dw3), lo=8.0, hi=512.0),
+        "pw3": _scale_from_max(pct_max(stem_a_pw3), lo=8.0, hi=512.0),
     }
     model.stem_w_scales = {
         "stem": _per_channel_scale_conv(model.stem.stem.weight).cpu(),
@@ -535,6 +554,8 @@ def calibrate_scales(
         "pw": _per_channel_scale_conv(model.stem.pw.weight).cpu(),
         "dw2": _per_channel_scale_conv(model.stem.dw2.weight).cpu(),
         "pw2": _per_channel_scale_conv(model.stem.pw2.weight).cpu(),
+        "dw3": _per_channel_scale_conv(model.stem.dw3.weight).cpu(),
+        "pw3": _per_channel_scale_conv(model.stem.pw3.weight).cpu(),
     }
     print(f"calibrated stem acts: {model.stem_act_scales}")
     print(
@@ -685,6 +706,10 @@ def load_weights_into_model(model: TinyViT, path: Path, device: torch.device) ->
         model.stem.dw2.bias.data.copy_(torch.from_numpy(s.b_dw2))
         model.stem.pw2.weight.data.copy_(_deq_conv(s.w_pw2, s.sw_pw2))
         model.stem.pw2.bias.data.copy_(torch.from_numpy(s.b_pw2))
+        model.stem.dw3.weight.data.copy_(_deq_conv(s.w_dw3, s.sw_dw3))
+        model.stem.dw3.bias.data.copy_(torch.from_numpy(s.b_dw3))
+        model.stem.pw3.weight.data.copy_(_deq_conv(s.w_pw3, s.sw_pw3))
+        model.stem.pw3.bias.data.copy_(torch.from_numpy(s.b_pw3))
         model.stem_act_scales = {
             "in": s.sa_in,
             "stem": s.sa_stem,
@@ -692,6 +717,8 @@ def load_weights_into_model(model: TinyViT, path: Path, device: torch.device) ->
             "pw": s.sa_pw,
             "dw2": s.sa_dw2,
             "pw2": s.sa_pw2,
+            "dw3": s.sa_dw3,
+            "pw3": s.sa_pw3,
         }
         model.stem_w_scales = {
             "stem": torch.from_numpy(np.asarray(s.sw_stem, dtype=np.float32)),
@@ -699,6 +726,8 @@ def load_weights_into_model(model: TinyViT, path: Path, device: torch.device) ->
             "pw": torch.from_numpy(np.asarray(s.sw_pw, dtype=np.float32)),
             "dw2": torch.from_numpy(np.asarray(s.sw_dw2, dtype=np.float32)),
             "pw2": torch.from_numpy(np.asarray(s.sw_pw2, dtype=np.float32)),
+            "dw3": torch.from_numpy(np.asarray(s.sw_dw3, dtype=np.float32)),
+            "pw3": torch.from_numpy(np.asarray(s.sw_pw3, dtype=np.float32)),
         }
     model.w_pe.data.copy_(
         torch.from_numpy((w.w_pe.astype(np.float32) / float(np.asarray(w.scale_embed.w).reshape(-1)[0])))
@@ -1026,8 +1055,8 @@ def main(argv: list[str] | None = None) -> int:
         default=4,
         help="transformer blocks (2–4); stem is separate on CPU/XNNPACK",
     )
-    p.add_argument("--epochs", type=int, default=30, help="float warm-up epochs (0=skip)")
-    p.add_argument("--qat-epochs", type=int, default=16, help="0=skip")
+    p.add_argument("--epochs", type=int, default=45, help="float warm-up epochs (0=skip)")
+    p.add_argument("--qat-epochs", type=int, default=20, help="0=skip")
     p.add_argument("--qat-lr-mult", type=float, default=0.25)
     p.add_argument("--cal-batches", type=int, default=30)
     p.add_argument(
@@ -1056,7 +1085,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--deploy-skip-threshold",
         type=float,
-        default=0.93,
+        default=0.96,
         help="skip deploy-FT when post-QAT numpy deploy acc >= this",
     )
     p.add_argument(
@@ -1090,8 +1119,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--subset", type=int, default=0, help="0 = full train set (60k)")
     p.add_argument("--augment", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--aug-shift", type=int, default=2, help="max ±px translate")
-    p.add_argument("--aug-noise", type=float, default=0.0, help="gaussian noise std")
-    p.add_argument("--aug-erase-prob", type=float, default=0.0)
+    p.add_argument("--aug-noise", type=float, default=0.05, help="gaussian noise std")
+    p.add_argument("--aug-erase-prob", type=float, default=0.15)
     p.add_argument("--aug-erase-size", type=int, default=4)
     p.add_argument("--sample-n", type=int, default=64)
     p.add_argument("--seed", type=int, default=0)

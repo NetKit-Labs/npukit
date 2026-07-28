@@ -117,16 +117,21 @@ def export_stem_tflite(model: tv.TinyViT | None = None) -> Path:
     model.eval()
     st = model.stem
 
+    mid, c = stem.STEM_MID, stem.STEM_C
     inp = tf.keras.Input(shape=(28, 28, 1), name="image")
-    x = tf.keras.layers.Conv2D(stem.STEM_C, 3, strides=2, padding="same", use_bias=True, name="stem")(inp)
+    x = tf.keras.layers.Conv2D(mid, 3, strides=2, padding="same", use_bias=True, name="stem")(inp)
     x = tf.nn.relu(x)
     x = tf.keras.layers.DepthwiseConv2D(3, strides=2, padding="same", use_bias=True, name="dw")(x)
     x = tf.nn.relu(x)
-    x = tf.keras.layers.Conv2D(stem.STEM_C, 1, strides=1, padding="valid", use_bias=True, name="pw")(x)
+    x = tf.keras.layers.Conv2D(mid, 1, strides=1, padding="valid", use_bias=True, name="pw")(x)
     x = tf.nn.relu(x)
     x = tf.keras.layers.DepthwiseConv2D(3, strides=1, padding="same", use_bias=True, name="dw2")(x)
     x = tf.nn.relu(x)
-    x = tf.keras.layers.Conv2D(stem.STEM_C, 1, strides=1, padding="valid", use_bias=True, name="pw2")(x)
+    x = tf.keras.layers.Conv2D(mid, 1, strides=1, padding="valid", use_bias=True, name="pw2")(x)
+    x = tf.nn.relu(x)
+    x = tf.keras.layers.DepthwiseConv2D(3, strides=1, padding="same", use_bias=True, name="dw3")(x)
+    x = tf.nn.relu(x)
+    x = tf.keras.layers.Conv2D(c, 1, strides=1, padding="valid", use_bias=True, name="pw3")(x)
     x = tf.nn.relu(x)
     x = tf.keras.layers.ZeroPadding2D(padding=((0, 1), (0, 1)), name="pad8")(x)  # 7→8
     x = tf.keras.layers.AveragePooling2D(pool_size=2, strides=2, padding="valid", name="pool")(x)
@@ -135,21 +140,21 @@ def export_stem_tflite(model: tv.TinyViT | None = None) -> Path:
     km = tf.keras.Model(inp, x, name="vit_ds_stem")
 
     with torch.no_grad():
-        w = st.stem.weight.detach().cpu().numpy()
-        b = st.stem.bias.detach().cpu().numpy()
-        km.get_layer("stem").set_weights([np.transpose(w, (2, 3, 1, 0)), b])
-        w = st.dw.weight.detach().cpu().numpy()
-        b = st.dw.bias.detach().cpu().numpy()
-        km.get_layer("dw").set_weights([np.transpose(w, (2, 3, 0, 1)), b])
-        w = st.pw.weight.detach().cpu().numpy()
-        b = st.pw.bias.detach().cpu().numpy()
-        km.get_layer("pw").set_weights([np.transpose(w, (2, 3, 1, 0)), b])
-        w = st.dw2.weight.detach().cpu().numpy()
-        b = st.dw2.bias.detach().cpu().numpy()
-        km.get_layer("dw2").set_weights([np.transpose(w, (2, 3, 0, 1)), b])
-        w = st.pw2.weight.detach().cpu().numpy()
-        b = st.pw2.bias.detach().cpu().numpy()
-        km.get_layer("pw2").set_weights([np.transpose(w, (2, 3, 1, 0)), b])
+        for name, conv in (
+            ("stem", st.stem),
+            ("dw", st.dw),
+            ("pw", st.pw),
+            ("dw2", st.dw2),
+            ("pw2", st.pw2),
+            ("dw3", st.dw3),
+            ("pw3", st.pw3),
+        ):
+            w = conv.weight.detach().cpu().numpy()
+            b = conv.bias.detach().cpu().numpy()
+            if "dw" in name:
+                km.get_layer(name).set_weights([np.transpose(w, (2, 3, 0, 1)), b])
+            else:
+                km.get_layer(name).set_weights([np.transpose(w, (2, 3, 1, 0)), b])
 
     # Verify vs torch
     img = np.random.randn(1, 28, 28, 1).astype(np.float32) * 0.1 + 0.5

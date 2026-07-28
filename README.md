@@ -1,6 +1,6 @@
 # NpuKit
 
-FPGA mini-NPU for the [PYNQ-Z2](https://www.tulembedded.com/FPGA/ProductsPYNQ-Z2.html) (Xilinx **Zynq-7020**): an **8×8 int8** output-stationary **systolic GEMM** (AXI4-Lite + AXI DMA) plus **transformer glue** (residual / GELU / RMSNorm / Softmax, `MAX_LEN=16`, 100 MHz). The Zynq A9 host tiles matmuls, runs a tiny **DS-stem** + float Softmax/RMSNorm/GELU, and schedules deploy-quantized **tiny-ViT** blocks (int8 GEMM on PL) on MNIST (~**97.4%**); a host **MCU-class DS-CNN** peer (~**98%** int8) sits beside it for edge compare.
+FPGA mini-NPU for the [PYNQ-Z2](https://www.tulembedded.com/FPGA/ProductsPYNQ-Z2.html) (Xilinx **Zynq-7020**): an **8×8 int8** output-stationary **systolic GEMM** (AXI4-Lite + AXI DMA) plus **transformer glue** (residual / GELU / RMSNorm / Softmax, `MAX_LEN=16`, 100 MHz). The Zynq A9 host tiles matmuls, runs a tiny **DS-stem** + float Softmax/RMSNorm/GELU, and schedules deploy-quantized **tiny-ViT** blocks (int8 GEMM on PL) on MNIST (~**98.0%**); a host **MCU-class DS-CNN** peer (~**98%** int8) sits beside it for edge compare.
 
 Part of [NetKit Labs](https://github.com/NetKit-Labs) — companion to [netkit](https://github.com/NetKit-Labs/netkit) (MCU/MPU inference), focused here on **custom FPGA acceleration** for edge transformers.
 
@@ -24,8 +24,8 @@ Part of [NetKit Labs](https://github.com/NetKit-Labs) — companion to [netkit](
 | yes | Transformer glue (`rtl/npukit_glue.sv`): residual / GELU / RMSNorm / Softmax — board PASS @ 100 MHz |
 | yes | Host `host/npukit_transformer.py` + `.ipynb` (glue + GEMM); RoPE / mask / reshape stay on A9 |
 | yes | E2E 1-layer smoke T=8×D=8 + fixed scales — `host/npukit_transformer_e2e.ipynb` (**ALL E2E PASS**) |
-| yes | MNIST tiny-ViT: CPU DS-stem + T=16×D=16×MLP32×L=4, per-channel weights, A9 float norms, int8 GEMM (~**97.4%** numpy/full test) |
-| yes | Host MCU-class DS-CNN MNIST peer (int8 ~**98.4%** / ~8 KiB; vs MCU+NpuKit tiny-ViT ~**97.4%** / ~11.5 KiB) |
+| yes | MNIST tiny-ViT: richer CPU DS-stem (MID=24) + T=16×D=16×MLP32×L=4, per-channel weights, A9 float norms, int8 GEMM (~**98.0%** numpy/full test) |
+| yes | Host MCU-class DS-CNN MNIST peer (int8 ~**98.4%** / ~8 KiB; vs MCU+NpuKit tiny-ViT ~**98.0%** / ~13 KiB) |
 | yes | Full board smoke with new weights: `host/npukit_board_smoke.ipynb` — **ALL SMOKE PASS**; ViT n=64 ref/hw **96.9%**, agree **100%** |
 
 Status write-up (results + next path): **[`docs/STATUS.md`](docs/STATUS.md)**.
@@ -37,7 +37,7 @@ Same MNIST task, two **deployment-shaped** models — not a param-matched bake-o
 | Peer | Role | Headline |
 |------|------|----------|
 | **DS-CNN** (`host/dscnn_mnist*.py`) | TinyML CNN you’d run on a Cortex-M / TFLite Micro–class MCU | int8 **~98.4%** / ~**8.3 KiB** (host; not on FPGA) |
-| **Tiny-ViT** (`host/npukit_vit_mnist*.py`) | CPU DS-stem + FPGA int8 GEMM + A9 float Softmax/RMSNorm/GELU | deploy-quant **~97.4%** / ~**11.5 KiB** (board **ALL VIT PASS**, 100% ref↔hw) |
+| **Tiny-ViT** (`host/npukit_vit_mnist*.py`) | CPU DS-stem + FPGA int8 GEMM + A9 float Softmax/RMSNorm/GELU | deploy-quant **~98.0%** / ~**13 KiB** (board **ALL SMOKE PASS** / **ALL VIT PASS** with MID=24 stem) |
 
 Compare **accuracy + weight KiB + where compute runs**. Details: [`docs/STATUS.md`](docs/STATUS.md).
 

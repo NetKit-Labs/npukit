@@ -31,8 +31,8 @@ ViT board sample **n=64**:
 
 | Metric | Result |
 |--------|--------|
-| ref accuracy | **62/64 (96.9%)** |
-| hw accuracy | **62/64 (96.9%)** |
+| ref accuracy | **61/64 (95.3%)** |
+| hw accuracy | **61/64 (95.3%)** |
 | ref↔hw pred agree | **64/64 (100%)** |
 | tensor max\|err\| | **0** (HW GEMM matches numpy GEMM with float norms) |
 
@@ -47,7 +47,7 @@ python npukit_vit_mnist.py /home/xilinx/jupyter_notebooks/npukit.bit -n 64
 
 Geometry (no resize):
 
-- Native **28×28** → **CPU richer DS-stem** (stem + 2× DW/PW) → **T=16×D=16** tokens
+- Native **28×28** → **CPU richer DS-stem** (MID=24, 3× DS blocks → D=16) → **T=16×D=16** tokens
 - Model dim **D=16**, FFN hidden **MLP=32**, **L=4** transformer blocks
 - **int8 GEMM** on FPGA; **A9 float32** Softmax / RMSNorm / GELU (`glue_mode=float`)
 - **Per-channel weight scales** on stem + GEMM mats; per-stage act / attn-p scales
@@ -56,20 +56,20 @@ Geometry (no resize):
 
 | Metric | Result |
 |--------|--------|
-| **Numpy quantized ref (full 10k test)** | **97.40%** |
-| Float test (full 10k) | **96.90%** |
-| Proxy QAT test (full 10k) | **97.38%** |
-| Proxy ↔ numpy gap (post-QAT) | **~0.6 pp** |
-| Learnable params (active path) | **~9.8k** (stem 1.0k + blocks 8.3k + pos/cls); ~10.7k incl. legacy `w_pe` |
-| Weight footprint (int8 + Q12) | **~11.5 KiB** |
-| Board sample n=64 | ref/hw **96.9%**, agree **100%**, **ALL VIT PASS** |
+| **Numpy quantized ref (full 10k test)** | **97.98%** |
+| Float test (full 10k) | **98.05%** |
+| Proxy QAT test (full 10k) | **97.91%** |
+| Proxy ↔ numpy gap (post-QAT) | **~0.4 pp** |
+| Learnable params (active path) | **~12.2k** (stem MID=24 + extra DS block ~2.6k; body unchanged) |
+| Weight footprint (int8 + Q12) | **~13 KiB** class |
+| Board sample n=64 | prior weights: ref/hw **96.9%**, agree **100%** — re-smoke after this stem bump |
 
 ## Edge comparison
 
 | Role | Model | Headline |
 |------|--------|----------|
 | **MCU-class CNN** | Host DS-CNN (int8) | **98.39%** / ~**8.3 KiB** / **~9.0k** params |
-| **MCU/MPU + accelerator ViT** | Tiny-ViT on NpuKit | **97.40%** / ~**11.5 KiB** / **~9.8k** active params |
+| **MCU/MPU + accelerator ViT** | Tiny-ViT on NpuKit | **97.98%** / ~**13 KiB** / **~12.2k** learnable params |
 
 Animated summary: [`viz/out/edge_peers.gif`](../viz/out/edge_peers.gif). Five-minute board path: [`host/board_bringup_5min.sh`](../host/board_bringup_5min.sh).
 
@@ -77,7 +77,7 @@ Animated summary: [`viz/out/edge_peers.gif`](../viz/out/edge_peers.gif). Five-mi
 
 - GEMM + glue RTL/bit @ 100 MHz, board unit + e2e PASS
 - Deploy-faithful tiny-ViT: CPU DS-stem + FPGA int8 GEMM + A9 float norms
-- Per-channel quant, stem-matched QAT, numpy deploy **97.40%**
+- Per-channel quant, stem-matched QAT, richer MID=24 stem, numpy deploy **97.98%**
 - Full board smoke with new weights: **ALL SMOKE PASS**, ViT ref↔hw **100%** agree
 - Host DS-CNN peer, Netron graphs, edge-peers GIF, 5-min bring-up script
 

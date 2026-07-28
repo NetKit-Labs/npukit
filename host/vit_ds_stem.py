@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Tiny MCU-class DS-stem for NpuKit ViT (CPU / TFLite+XNNPACK).
 
-Not the full DS-CNN peer — a slightly richer stem:
-  Conv stem (stride 2) → DS block (DW+PW, stride 2) → DS block (DW+PW, stride 1)
-  → pad 7→8 → pool to 4×4 → T=16 tokens of D=16 for the FPGA transformer body.
+Richer stem (still tiny; FPGA body unchanged):
+  Conv 1→MID (stride 2) → DS (DW+PW, stride 2) → DS (DW+PW, stride 1)
+  → DS (DW+PW_out→D, stride 1) → pad 7→8 → pool 4×4 → T=16×D=16 tokens.
 
 Float / QAT twin lives in train_vit_mnist.TinyViT; numpy + TFLite paths here.
 """
@@ -29,7 +29,8 @@ except ImportError:  # pragma: no cover
     F = None  # type: ignore
     _HAS_TORCH = False
 
-STEM_C = 16
+STEM_C = 16  # model dim / token channels (FPGA D)
+STEM_MID = 24  # wider internal stem channels
 STEM_T = 16  # 4×4
 STEM_HW = 4
 IMG = 28
@@ -38,17 +39,20 @@ IMG = 28
 if _HAS_TORCH:
 
     class TinyDSStem(nn.Module):
-        """28×28×1 → [B, T=16, D=16] tokens (channels = model dim)."""
+        """28×28×1 → [B, T=16, D=16] tokens (internal MID=24)."""
 
-        def __init__(self, c: int = STEM_C) -> None:
+        def __init__(self, c: int = STEM_C, mid: int = STEM_MID) -> None:
             super().__init__()
-            self.stem = nn.Conv2d(1, c, 3, stride=2, padding=1, bias=True)  # 14×14
-            self.dw = nn.Conv2d(c, c, 3, stride=2, padding=1, groups=c, bias=True)  # 7×7
-            self.pw = nn.Conv2d(c, c, 1, bias=True)
-            # Second DS block at stride 1 (richer teacher; still MCU-tiny).
-            self.dw2 = nn.Conv2d(c, c, 3, stride=1, padding=1, groups=c, bias=True)
-            self.pw2 = nn.Conv2d(c, c, 1, bias=True)
+            self.mid = mid
             self.c = c
+            self.stem = nn.Conv2d(1, mid, 3, stride=2, padding=1, bias=True)  # 14×14
+            self.dw = nn.Conv2d(mid, mid, 3, stride=2, padding=1, groups=mid, bias=True)  # 7×7
+            self.pw = nn.Conv2d(mid, mid, 1, bias=True)
+            self.dw2 = nn.Conv2d(mid, mid, 3, stride=1, padding=1, groups=mid, bias=True)
+            self.pw2 = nn.Conv2d(mid, mid, 1, bias=True)
+            # Extra DS block; pointwise projects MID → D for transformer tokens.
+            self.dw3 = nn.Conv2d(mid, mid, 3, stride=1, padding=1, groups=mid, bias=True)
+            self.pw3 = nn.Conv2d(mid, c, 1, bias=True)
 
         def forward(self, x: "torch.Tensor") -> "torch.Tensor":
             """x: [B,28,28] or [B,1,28,28] → [B,16,C]."""
@@ -59,6 +63,8 @@ if _HAS_TORCH:
             x = F.relu(self.pw(x), inplace=False)
             x = F.relu(self.dw2(x), inplace=False)
             x = F.relu(self.pw2(x), inplace=False)
+            x = F.relu(self.dw3(x), inplace=False)
+            x = F.relu(self.pw3(x), inplace=False)
             # 7×7 → pad to 8×8 → avg-pool 2×2 → 4×4 (TFLite-friendly; T=16)
             x = F.pad(x, (0, 1, 0, 1))
             x = F.avg_pool2d(x, kernel_size=2, stride=2)
@@ -88,6 +94,9 @@ def _per_out_channel_scale(w: Any, *, lo: float = 8.0, hi: float = 512.0) -> np.
     return np.clip(127.0 / amax * 0.95, lo, hi).astype(np.float64)
 
 
+_STEM_CONV_KEYS = ("stem", "dw", "pw", "dw2", "pw2", "dw3", "pw3")
+
+
 @dataclass
 class StemInt8:
     """Exported int8 stem for numpy deploy-ref (matches TFLite float closely)."""
@@ -102,19 +111,25 @@ class StemInt8:
     b_dw2: np.ndarray
     w_pw2: np.ndarray
     b_pw2: np.ndarray
-    # per-tensor act scales (input + post each layer)
+    w_dw3: np.ndarray
+    b_dw3: np.ndarray
+    w_pw3: np.ndarray
+    b_pw3: np.ndarray
     sa_in: float
     sa_stem: float
     sa_dw: float
     sa_pw: float
     sa_dw2: float
     sa_pw2: float
-    # per-output-channel weight scales
+    sa_dw3: float
+    sa_pw3: float
     sw_stem: np.ndarray
     sw_dw: np.ndarray
     sw_pw: np.ndarray
     sw_dw2: np.ndarray
     sw_pw2: np.ndarray
+    sw_dw3: np.ndarray
+    sw_pw3: np.ndarray
 
     @staticmethod
     def from_module(
@@ -132,31 +147,13 @@ class StemInt8:
                 np.round(w.detach().cpu().numpy() * ss), -128, 127
             ).astype(np.int8)
 
-        act_scales = act_scales or {
-            "in": 127.0,
-            "stem": 127.0,
-            "dw": 127.0,
-            "pw": 127.0,
-            "dw2": 127.0,
-            "pw2": 127.0,
-        }
+        act_scales = act_scales or {k: 127.0 for k in ("in", *_STEM_CONV_KEYS)}
+        convs = {k: getattr(m, k) for k in _STEM_CONV_KEYS}
         if w_scales is None:
-            sw = {
-                "stem": _per_out_channel_scale(m.stem.weight),
-                "dw": _per_out_channel_scale(m.dw.weight),
-                "pw": _per_out_channel_scale(m.pw.weight),
-                "dw2": _per_out_channel_scale(m.dw2.weight),
-                "pw2": _per_out_channel_scale(m.pw2.weight),
-            }
+            sw = {k: _per_out_channel_scale(conv.weight) for k, conv in convs.items()}
         else:
             sw = {}
-            for k, conv in (
-                ("stem", m.stem),
-                ("dw", m.dw),
-                ("pw", m.pw),
-                ("dw2", m.dw2),
-                ("pw2", m.pw2),
-            ):
+            for k, conv in convs.items():
                 v = w_scales[k]
                 if isinstance(v, (float, int, np.floating)):
                     sw[k] = np.full(conv.weight.shape[0], float(v), dtype=np.float64)
@@ -174,17 +171,25 @@ class StemInt8:
             b_dw2=m.dw2.bias.detach().cpu().numpy().astype(np.float32),
             w_pw2=q(m.pw2.weight, sw["pw2"]),
             b_pw2=m.pw2.bias.detach().cpu().numpy().astype(np.float32),
+            w_dw3=q(m.dw3.weight, sw["dw3"]),
+            b_dw3=m.dw3.bias.detach().cpu().numpy().astype(np.float32),
+            w_pw3=q(m.pw3.weight, sw["pw3"]),
+            b_pw3=m.pw3.bias.detach().cpu().numpy().astype(np.float32),
             sa_in=float(act_scales["in"]),
             sa_stem=float(act_scales["stem"]),
             sa_dw=float(act_scales["dw"]),
             sa_pw=float(act_scales["pw"]),
-            sa_dw2=float(act_scales.get("dw2", act_scales["pw"])),
-            sa_pw2=float(act_scales.get("pw2", act_scales["pw"])),
+            sa_dw2=float(act_scales["dw2"]),
+            sa_pw2=float(act_scales["pw2"]),
+            sa_dw3=float(act_scales["dw3"]),
+            sa_pw3=float(act_scales.get("pw3", act_scales["pw2"])),
             sw_stem=np.asarray(sw["stem"], dtype=np.float64),
             sw_dw=np.asarray(sw["dw"], dtype=np.float64),
             sw_pw=np.asarray(sw["pw"], dtype=np.float64),
             sw_dw2=np.asarray(sw["dw2"], dtype=np.float64),
             sw_pw2=np.asarray(sw["pw2"], dtype=np.float64),
+            sw_dw3=np.asarray(sw["dw3"], dtype=np.float64),
+            sw_pw3=np.asarray(sw["pw3"], dtype=np.float64),
         )
 
     def to_dict(self) -> dict[str, np.ndarray]:
@@ -200,9 +205,9 @@ class StemInt8:
     def from_npz(data) -> "StemInt8 | None":
         if "stem_w_stem" not in data.files:
             return None
-        if "stem_w_dw2" not in data.files:
+        if "stem_w_dw3" not in data.files:
             raise ValueError(
-                "stem npz missing dw2/pw2 (richer stem). Retrain with train_vit_mnist.py"
+                "stem npz missing dw3/pw3 (MID stem). Retrain with train_vit_mnist.py"
             )
 
         def _sw(key: str, cout: int) -> np.ndarray:
@@ -212,7 +217,9 @@ class StemInt8:
             return arr.reshape(-1)
 
         w_stem = np.asarray(data["stem_w_stem"], dtype=np.int8)
-        c = w_stem.shape[0]
+        mid = w_stem.shape[0]
+        w_pw3 = np.asarray(data["stem_w_pw3"], dtype=np.int8)
+        c_out = w_pw3.shape[0]
         return StemInt8(
             w_stem=w_stem,
             b_stem=np.asarray(data["stem_b_stem"], dtype=np.float32),
@@ -224,17 +231,25 @@ class StemInt8:
             b_dw2=np.asarray(data["stem_b_dw2"], dtype=np.float32),
             w_pw2=np.asarray(data["stem_w_pw2"], dtype=np.int8),
             b_pw2=np.asarray(data["stem_b_pw2"], dtype=np.float32),
+            w_dw3=np.asarray(data["stem_w_dw3"], dtype=np.int8),
+            b_dw3=np.asarray(data["stem_b_dw3"], dtype=np.float32),
+            w_pw3=w_pw3,
+            b_pw3=np.asarray(data["stem_b_pw3"], dtype=np.float32),
             sa_in=float(data["stem_sa_in"][0]),
             sa_stem=float(data["stem_sa_stem"][0]),
             sa_dw=float(data["stem_sa_dw"][0]),
             sa_pw=float(data["stem_sa_pw"][0]),
             sa_dw2=float(data["stem_sa_dw2"][0]),
             sa_pw2=float(data["stem_sa_pw2"][0]),
-            sw_stem=_sw("stem_sw_stem", c),
-            sw_dw=_sw("stem_sw_dw", c),
-            sw_pw=_sw("stem_sw_pw", c),
-            sw_dw2=_sw("stem_sw_dw2", c),
-            sw_pw2=_sw("stem_sw_pw2", c),
+            sa_dw3=float(data["stem_sa_dw3"][0]),
+            sa_pw3=float(data["stem_sa_pw3"][0]),
+            sw_stem=_sw("stem_sw_stem", mid),
+            sw_dw=_sw("stem_sw_dw", mid),
+            sw_pw=_sw("stem_sw_pw", mid),
+            sw_dw2=_sw("stem_sw_dw2", mid),
+            sw_pw2=_sw("stem_sw_pw2", mid),
+            sw_dw3=_sw("stem_sw_dw3", mid),
+            sw_pw3=_sw("stem_sw_pw3", c_out),
         )
 
 
@@ -284,12 +299,14 @@ def stem_forward_numpy(img28: np.ndarray, s: StemInt8, *, qat: bool = True) -> n
         y = _conv2d_nchw(xin, w, b, stride=stride, padding=padding, groups=groups)
         return np.maximum(y, 0.0)
 
+    mid = s.w_stem.shape[0]
     x = layer(x, s.w_stem, s.b_stem, s.sw_stem, s.sa_in, stride=2, padding=1, groups=1)
-    c = s.w_stem.shape[0]
-    x = layer(x, s.w_dw, s.b_dw, s.sw_dw, s.sa_stem, stride=2, padding=1, groups=c)
+    x = layer(x, s.w_dw, s.b_dw, s.sw_dw, s.sa_stem, stride=2, padding=1, groups=mid)
     x = layer(x, s.w_pw, s.b_pw, s.sw_pw, s.sa_dw, stride=1, padding=0, groups=1)
-    x = layer(x, s.w_dw2, s.b_dw2, s.sw_dw2, s.sa_pw, stride=1, padding=1, groups=c)
+    x = layer(x, s.w_dw2, s.b_dw2, s.sw_dw2, s.sa_pw, stride=1, padding=1, groups=mid)
     x = layer(x, s.w_pw2, s.b_pw2, s.sw_pw2, s.sa_dw2, stride=1, padding=0, groups=1)
+    x = layer(x, s.w_dw3, s.b_dw3, s.sw_dw3, s.sa_pw2, stride=1, padding=1, groups=mid)
+    x = layer(x, s.w_pw3, s.b_pw3, s.sw_pw3, s.sa_dw3, stride=1, padding=0, groups=1)
     # pad 7→8, avg pool 2 → 4×4
     x = np.pad(x, ((0, 0), (0, 0), (0, 1), (0, 1)))
     x = x.reshape(1, x.shape[1], 4, 2, 4, 2).mean(axis=(3, 5))  # [1,C,4,4]
