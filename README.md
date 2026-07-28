@@ -27,8 +27,9 @@ Part of [NetKit Labs](https://github.com/NetKit-Labs) — companion to [netkit](
 | yes | MNIST tiny-ViT: richer CPU DS-stem (MID=24) + T=16×D=16×MLP32×L=4, per-channel weights, A9 float norms, int8 GEMM (~**98.0%** numpy/full test) |
 | yes | Host MCU-class DS-CNN MNIST peer (int8 ~**98.4%** / ~8 KiB; vs MCU+NpuKit tiny-ViT ~**98.0%** / ~13 KiB) |
 | yes | Full board smoke with new weights: `host/npukit_board_smoke.ipynb` — **ALL SMOKE PASS**; ViT n=64 ref/hw **96.9%**, agree **100%** |
+| yes | Layer-resident weight bank (`VERSION 0x302`, `FEAT_WMEM`): load `W` once, A-only kicks — board correct; default host stays A∥B (faster on tiny-ViT) |
 
-Status write-up (results + next path): **[`docs/STATUS.md`](docs/STATUS.md)**.
+Status write-up (results + next path): **[`docs/STATUS.md`](docs/STATUS.md)**. Weight-stationary / WMEM: **[`docs/weight_stationary.md`](docs/weight_stationary.md)**.
 
 ## Edge peers (MCU vs MCU+accelerator)
 
@@ -93,11 +94,11 @@ Base address (BD default target): **`0x43C0_0000`**
 | Offset | Name | Access | Description |
 |--------|------|--------|-------------|
 | `0x000` | ID | R | `0x4E50554B` (`NPUK`) |
-| `0x004` | VERSION | R | `0x00000300` (glue-enabled bitstreams) |
+| `0x004` | VERSION | R | `0x00000302` (WMEM + WS/PP; glue from `0x300`) |
 | `0x008` | STATUS | R | `[0]` busy, `[1]` gemm done, `[2]` AXIS RX, `[3]` AXIS TX, `[4]` glue done |
-| `0x00C` | CTRL | W | `[0]` start, `[1]` clear, `[2]` arm C AXIS TX (all write-1 pulses) |
+| `0x00C` | CTRL | W | `[0]` start, `[1]` clear, `[2]` arm C AXIS TX, `[3]` use WMEM (with start) |
 | `0x010` | N | R | `8` |
-| `0x014` | FEATURES | R | `[0]` GEMM, `[1]` GLUE |
+| `0x014` | FEATURES | R | `[0]` GEMM, `[1]` GLUE, `[2]` WS, `[3]` PP, `[4]` WMEM |
 | `0x018` | GLUE_CTRL | W | `[0]` start, `[7:4]` opcode — see `docs/transformer_glue.md` |
 | `0x01C` | GLUE_LEN | R/W | vector length `1..16` |
 | `0x020` | GLUE_PARAM | R/W | e.g. RMSNorm ε (Q12) |

@@ -88,15 +88,16 @@ Animated summary: [`viz/out/edge_peers.gif`](../viz/out/edge_peers.gif). Five-mi
 | Path | ~ms/img |
 |------|--------:|
 | Python ViT FPGA (pool + fast stem) | ~614 |
-| C++ ViT FPGA GEMM (XRT CMA, pre-WS) | ~9.4 |
+| C++ ViT FPGA GEMM (XRT CMA, A∥B, `0x302`) | **~9.8** |
+| Same with `NPUKIT_WMEM=1` | ~10.0 (correct; not faster on tiny-ViT) |
 | C++ DS-CNN int8 peer | ~9.3 |
 | C++ ViT CPU GEMM | ~6.6 |
 
-See `host/cpp/README.md`. WS+PP targets the FPGA path vs A9 CPU GEMM.
+See `host/cpp/README.md` and [`weight_stationary.md`](weight_stationary.md). Smoke logs: [`results/wmem_20260728T133256Z/`](../results/wmem_20260728T133256Z/).
 
 ## Still optionally valuable
 
-1. Layer-level weight BRAM (hold full `W`, stream only activations)
+1. Close **100 MHz timing** on the WMEM bitstream (smoke WNS ≈ −1.57 ns; functional OK)
 2. Close the last **~1 pp** vs DS-CNN
 3. PE-grid growth / larger demo model once host traffic is no longer the limit
 4. Multi-head attention + per-head scales

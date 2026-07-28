@@ -12,15 +12,15 @@ Start a **small NPU** on PYNQ-Z2: an **8×8 int8 systolic array**, built and ver
 4. **Project skeleton** with AXI-Lite + AXI DMA (PS `M_AXI_GP0` + `S_AXI_HP0`)
 5. **Host** — tiled matmul via `host/npukit_matmul.py` / `.ipynb` (NumPy check)
 
-The **GEMM hardware MVP is complete**. Transformer **glue** (VERSION `0x300`: residual / GELU / RMSNorm / Softmax, `MAX_LEN=16`) meets **100 MHz** and passes on PYNQ-Z2 with `host/npukit_transformer.py`. Synthetic 1-layer e2e smoke (T=8×D=8) is **ALL E2E PASS** in `host/npukit_transformer_e2e.ipynb`. RoPE / masks / reshape stay on the A9.
+The **GEMM hardware MVP is complete**. Transformer **glue** (from VERSION `0x300`: residual / GELU / RMSNorm / Softmax, `MAX_LEN=16`) meets **100 MHz** and passes on PYNQ-Z2 with `host/npukit_transformer.py`. Current bitstreams are **`VERSION 0x302`**: weight-stationary + A ping-pong (`FEAT_WS|PP`) and **layer-resident weight bank** (`FEAT_WMEM` — load full `K×N` once, stream A-only). Host default stays A∥B on tiny-ViT; opt in with `NPUKIT_WMEM=1`. See [`docs/weight_stationary.md`](docs/weight_stationary.md).
 
-**Host ViT path done for this MVP:** MNIST tiny-ViT **T=16×D=16×L=2**, per-stage scales, **deploy-faithful QAT**. Numpy/board-ref **~94.3%** on full test; board sample ~94% labels, pred agree ~98%, **ALL VIT PASS**.
+**Host ViT path done for this MVP:** MNIST tiny-ViT **T=16×D=16×MLP32×L=4**, richer DS-stem, per-channel weights, **deploy-faithful QAT**. Numpy deploy-quant **~98.0%** on full test; board smoke **ALL VIT PASS** / pred agree **100%**.
 
-**Edge peers (not param-matched):** (1) **MCU-class DS-CNN** — TinyML DW/PW CNN, host int8 ~**98.4%** / ~8 KiB (`host/train_dscnn_mnist.py`); (2) **MCU/MPU + accelerator tiny-ViT** — T=16×D=16×L=2 on NpuKit, deploy-quant ~**94.3%** / ~4 KiB. Compare accuracy + footprint + where compute runs.
+**Edge peers (not param-matched):** (1) **MCU-class DS-CNN** — TinyML DW/PW CNN, host int8 ~**98.4%** / ~8 KiB (`host/train_dscnn_mnist.py`); (2) **MCU/MPU + accelerator tiny-ViT** — on NpuKit, deploy-quant ~**98.0%** / ~13 KiB. Compare accuracy + footprint + where compute runs.
 
-**Optional later:** per-head scales (MHA), longer ViT deploy-FT, ping-pong, depthwise / CNN on FPGA.
+**Optional later:** close WMEM 100 MHz timing (smoke WNS ≈ −1.57 ns), per-head scales (MHA), larger PE grid / model, depthwise / CNN on FPGA.
 
-Docs: status [`docs/STATUS.md`](docs/STATUS.md), FPGA vs CPU [`docs/transformer_split.md`](docs/transformer_split.md), glue contract [`docs/transformer_glue.md`](docs/transformer_glue.md), bring-up [`docs/glue_bringup.md`](docs/glue_bringup.md), tiling [`docs/tiling.md`](docs/tiling.md).
+Docs: status [`docs/STATUS.md`](docs/STATUS.md), WMEM/WS [`docs/weight_stationary.md`](docs/weight_stationary.md), FPGA vs CPU [`docs/transformer_split.md`](docs/transformer_split.md), glue contract [`docs/transformer_glue.md`](docs/transformer_glue.md), bring-up [`docs/glue_bringup.md`](docs/glue_bringup.md), tiling [`docs/tiling.md`](docs/tiling.md).
 
 ## Project layout
 
@@ -78,13 +78,14 @@ An int8 8×8 GEMM covers MLP/FC and 1×1 conv; standard conv can be lowered to G
 
 - GEMM + DMA + host tiling: **done** (board **12/12 PASS**; dumps in `host/npukit_matmul.ipynb`).
 - Transformer glue v0x300: **done** (100 MHz closed; board residual/GELU/RMSNorm/Softmax + GEMM PASS).
+- Weight-stationary + A ping-pong + layer-resident WMEM (`VERSION 0x302`): **done** (board functional; WMEM not faster on tiny-ViT — see [`docs/weight_stationary.md`](docs/weight_stationary.md)).
 - Synthetic 1-layer e2e T=8×D=8: **done** (**ALL E2E PASS** in `host/npukit_transformer_e2e.ipynb`).
-- MNIST tiny-ViT T=16×D=16×L=2 + per-stage scales + deploy-faithful QAT: **done** (numpy/full test **~94.3%**; board **ALL VIT PASS**; see [`docs/STATUS.md`](docs/STATUS.md)).
+- MNIST tiny-ViT T=16×D=16×MLP32×L=4 + per-channel scales + deploy-faithful QAT: **done** (numpy/full test **~98.0%**; board **ALL VIT PASS**; see [`docs/STATUS.md`](docs/STATUS.md)).
 - Host DS-CNN MNIST reference: **done** (float **98.00%** / int8 **98.39%** / 10k; not FPGA; see [`docs/STATUS.md`](docs/STATUS.md)).
 - Rebuild with `../scripts/build_bitstream.sh npukit` (or in-repo `scripts/`) after RTL/BD changes.
 
 ### Z7020 size note
 
-GEMM-only bit was ~**13% LUT / 64 DSP**; with glue ~**18–19% LUT / ~72 DSP**. Those **2 BRAM tiles** on the GEMM path are packing of `a_mem`/`b_mem`/`c_mem` — not ping-pong. Glue vector banks are small register files (`MAX_LEN=16`).
+GEMM-only bit was ~**13% LUT / 64 DSP**; with glue ~**18–19% LUT / ~72 DSP**. WMEM packs `w_mem` as **RAMB18** (full `K×N≤1024`). Glue vector banks are small register files (`MAX_LEN=16`).
 
-Scaling the PE grid \(8→16\) is still \(4×\) array area (~256 DSPs needed for 1:1 MAC mapping; the chip has 220), so prefer **stay 8×8 + tile + DMA**, optionally add ping-pong later.
+Scaling the PE grid \(8→16\) is still \(4×\) array area (~256 DSPs needed for 1:1 MAC mapping; the chip has 220), so prefer **stay 8×8 + tile + DMA** (WS/PP and WMEM already in `0x302`).
