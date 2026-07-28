@@ -35,11 +35,13 @@ void Device::load_b_dma(const int8_t[TILE_ELEMS]) {}
 void Device::load_b_mmio(const int8_t[TILE_ELEMS]) {}
 void Device::load_a_dma(const int8_t[TILE_ELEMS], bool) {}
 void Device::load_a_mmio(const int8_t[TILE_ELEMS]) {}
+void Device::load_weight_bank_dma(const int8_t*, int, int) {}
 void Device::wait_mm2s_idle() {}
 void Device::sync_tx_to_device(int, size_t) {}
 void Device::sync_rx_from_device(size_t) {}
 void Device::read_tile_dma(int32_t[TILE_ELEMS]) {}
 void Device::read_tile_mmio(int32_t[TILE_ELEMS]) {}
 void Device::matmul_i8_legacy(const int8_t*, const int8_t*, int32_t*, int, int, int) {}
+void Device::matmul_i8_wmem(const int8_t*, const int8_t*, int32_t*, int, int, int) {}
 
 }  // namespace npukit

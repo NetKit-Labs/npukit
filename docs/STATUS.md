@@ -4,16 +4,17 @@ Checkpoint after board re-smoke of deploy-track ViT (richer DS-stem, L=4, MLP=32
 
 ## Where we are
 
-**Hardware MVP is complete.** The Zynq-7020 bitstream (`VERSION 0x301`) provides:
+**Hardware MVP is complete.** Board is on `VERSION 0x302` with layer-resident weights (`FEAT_WMEM`, `w_mem` = RAMB18):
 
 | Block | Role |
 |-------|------|
 | 8×8 int8 systolic GEMM | Output-stationary; tiled MxKxN via host DMA/MMIO |
+| Layer-resident weight bank | `LOAD_W` once into BRAM (`K*N≤1024`); A-only kicks + `TILE_KJ` (`FEAT_WMEM`) |
 | Weight-stationary + A ping-pong | `LOAD_CFG` A/B-only AXIS; dual-A shadow fill while busy (`FEAT_WS\|PP`) |
 | Transformer glue | Residual / GELU / RMSNorm / Softmax, `MAX_LEN=16`, 100 MHz (optional path) |
 | Host (A9) | C++ driver (XRT CMA), per-channel quant, DS-stem, float Softmax/RMSNorm/GELU |
 
-Fabric clock: **PS FCLK0 @ 100 MHz**. Latest rebuild closed timing (**WNS ≈ +0.83 ns** post-route).
+Fabric clock: **PS FCLK0 @ 100 MHz**. WMEM smoke build: **WNS ≈ −1.57 ns** (functional OK; timing close is follow-on). Host default remains A∥B; `NPUKIT_WMEM=1` to exercise the bank — see [`results/wmem_20260728T133256Z/`](../results/wmem_20260728T133256Z/).
 
 ## Board results (2026-07-27 re-smoke)
 

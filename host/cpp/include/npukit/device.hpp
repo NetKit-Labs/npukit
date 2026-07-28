@@ -19,7 +19,8 @@ class Device {
  public:
   // Maps NPU + DMA. Bitstream must already be loaded (e.g. via PYNQ Overlay once).
   // Prefers XRT CMA BO, then legacy xlnk, else MMIO.
-  // When FEATURES has WS+PP, matmul_i8 uses weight-stationary B + A ping-pong.
+  // Layer-resident W (FEAT_WMEM): opt in with NPUKIT_WMEM=1.
+  // Tile WS+PP: NPUKIT_WS_PP=1. Default remains legacy A∥B (fastest here).
   explicit Device(bool use_dma = true);
   ~Device();
 
@@ -43,6 +44,7 @@ class Device {
   const char* dma_backend_name() const;
   bool weight_stationary() const { return (features() & FEAT_WS) != 0; }
   bool ping_pong() const { return (features() & FEAT_PP) != 0; }
+  bool weight_bank() const { return (features() & FEAT_WMEM) != 0; }
 
  private:
   void* map_region(uint32_t phys, size_t span);
@@ -65,6 +67,7 @@ class Device {
   void load_b_mmio(const int8_t b[TILE_ELEMS]);
   void load_a_dma(const int8_t a[TILE_ELEMS], bool wait_idle);
   void load_a_mmio(const int8_t a[TILE_ELEMS]);
+  void load_weight_bank_dma(const int8_t* b, int k, int n);
   void wait_mm2s_idle();
   void read_tile_dma(int32_t c[TILE_ELEMS]);
   void read_tile_mmio(int32_t c[TILE_ELEMS]);
@@ -72,6 +75,7 @@ class Device {
   void sync_rx_from_device(size_t nbytes);
 
   void matmul_i8_legacy(const int8_t* a, const int8_t* b, int32_t* c, int m, int k, int n);
+  void matmul_i8_wmem(const int8_t* a, const int8_t* b, int32_t* c, int m, int k, int n);
 
   int fd_mem_{-1};
   volatile uint32_t* npu_{nullptr};

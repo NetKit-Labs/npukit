@@ -212,6 +212,102 @@ module npukit_axil_tb;
             end
         end
 
+        // -----------------------------------------------------------------
+        // Layer-resident W: AXIS LOAD_W, A via MMIO, CTRL.use_wmem
+        // -----------------------------------------------------------------
+        begin : wmem_test
+            logic signed [7:0]  Ww [0:NN-1];
+            logic signed [7:0]  Aw [0:NN-1];
+            logic signed [31:0] Cw_ref [0:NN-1];
+            int wi, wj, wk;
+            logic [31:0] wdata;
+
+            for (wi = 0; wi < N; wi++) begin
+                for (wj = 0; wj < N; wj++) begin
+                    Aw[wi*N + wj] = 8'(wi - wj);
+                    Ww[wi*N + wj] = 8'(wj + 2);
+                end
+            end
+            for (wi = 0; wi < N; wi++)
+                for (wj = 0; wj < N; wj++) begin
+                    Cw_ref[wi*N + wj] = 0;
+                    for (wk = 0; wk < N; wk++)
+                        Cw_ref[wi*N + wj] += int'(Aw[wi*N + wk]) * int'(Ww[wk*N + wj]);
+                end
+
+            axi_read(32'h004, status);
+            if (status !== 32'h00000302) begin
+                $display("FAIL VERSION: got %h exp 302", status);
+                errors++;
+            end
+            axi_read(32'h014, status);
+            if (!(status[4])) begin
+                $display("FAIL FEATURES.WMEM clear: %h", status);
+                errors++;
+            end
+
+            axi_write(32'h02C, {16'd8, 16'd8}); // W_SHAPE N<<16|K
+            axi_write(32'h030, 32'd0);           // TILE_KJ = (0,0)
+            axi_write(32'h028, 32'd3);           // LOAD_W
+            // LOAD_CFG / W_SHAPE take effect one cycle after BRESP (wr_en path).
+            repeat (4) @(posedge clk);
+
+            // Stream W over AXIS (16 words) — one beat per iteration (no double-fire)
+            for (wi = 0; wi < NN; wi += 4) begin
+                @(posedge clk);
+                s_axis_tdata  <= {Ww[wi+3], Ww[wi+2], Ww[wi+1], Ww[wi+0]};
+                s_axis_tvalid <= 1'b1;
+                s_axis_tlast  <= (wi + 4 >= NN);
+                while (!s_axis_tready) @(posedge clk);
+            end
+            @(posedge clk);
+            s_axis_tvalid <= 1'b0;
+            s_axis_tlast  <= 1'b0;
+            // Wait AXIS RX done
+            status = 0;
+            wi = 0;
+            while ((wi < 50) && !status[2]) begin
+                axi_read(32'h008, status);
+                wi++;
+            end
+            if (!status[2]) begin
+                $display("FAIL wmem: AXIS RX not done");
+                errors++;
+            end
+
+            for (wi = 0; wi < NN; wi += 4)
+                axi_write(32'h100 + wi, {Aw[wi+3], Aw[wi+2], Aw[wi+1], Aw[wi+0]});
+            repeat (2) @(posedge clk);
+
+            axi_write(32'h00C, 32'h2); // CLEAR (drops stale DONE)
+            repeat (2) @(posedge clk);
+            axi_write(32'h00C, 32'h9); // START|USE_WMEM
+            // Wait busy then done (avoid latching prior DONE).
+            status = 0;
+            wi = 0;
+            while ((wi < 50) && !status[0]) begin
+                axi_read(32'h008, status);
+                wi++;
+            end
+            wi = 0;
+            while ((wi < 400) && !(status[1] && !status[0])) begin
+                axi_read(32'h008, status);
+                wi++;
+            end
+            if (!(status[1] && !status[0])) begin
+                $display("FAIL wmem: timed out (status=%h)", status);
+                errors++;
+            end
+            for (wi = 0; wi < NN; wi++) begin
+                axi_read(32'h400 + (wi * 4), wdata);
+                if ($signed(wdata) !== Cw_ref[wi]) begin
+                    $display("FAIL wmem C[%0d]: got %0d exp %0d",
+                             wi, $signed(wdata), Cw_ref[wi]);
+                    errors++;
+                end
+            end
+        end
+
         if (errors == 0)
             $display("npukit_axil_tb: ALL PASS");
         else

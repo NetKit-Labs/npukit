@@ -34,9 +34,10 @@ int main(int argc, char** argv) {
   try {
     npukit::Device dev(use_dma);
     std::printf("NpuKit C++ driver\n");
-    std::printf("  ID=0x%08X VERSION=0x%08X FEATURES=0x%08X DMA=%s WS=%d PP=%d\n",
+    std::printf("  ID=0x%08X VERSION=0x%08X FEATURES=0x%08X DMA=%s WS=%d PP=%d WMEM=%d\n",
                 dev.id(), dev.version(), dev.features(), dev.dma_backend_name(),
-                dev.weight_stationary() ? 1 : 0, dev.ping_pong() ? 1 : 0);
+                dev.weight_stationary() ? 1 : 0, dev.ping_pong() ? 1 : 0,
+                dev.weight_bank() ? 1 : 0);
 
 
     // Correctness: 8x8 identity-ish

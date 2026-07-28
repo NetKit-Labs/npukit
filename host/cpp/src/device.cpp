@@ -5,6 +5,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -172,7 +173,8 @@ Device::Device(bool use_dma) {
   use_dma_ = use_dma;
   if (use_dma_) {
     dma_ = static_cast<volatile uint32_t*>(map_region(DMA_BASE, DMA_SPAN));
-    const size_t tx_bytes = AB_WORDS * sizeof(uint32_t);
+    // TX must fit full weight bank (W_CAP int8) for LOAD_W.
+    const size_t tx_bytes = std::max(size_t(AB_WORDS * sizeof(uint32_t)), size_t(W_CAP));
     const size_t rx_bytes = C_WORDS * sizeof(uint32_t);
     const bool ok = try_init_dma_xrt(tx_bytes, rx_bytes) || try_init_dma_xlnk(tx_bytes, rx_bytes);
     if (!ok) {
@@ -253,6 +255,25 @@ void Device::dma_reset() {
 
 void Device::set_load_cfg(uint32_t mode) {
   if (version() >= 0x301u) npu_wr(REG_LOAD_CFG, mode & 0x3u);
+}
+
+void Device::load_weight_bank_dma(const int8_t* b, int k, int n) {
+  if (k < 1 || n < 1 || size_t(k) * size_t(n) > size_t(W_CAP))
+    throw std::invalid_argument("weight bank K*N out of range");
+  npu_wr(REG_W_SHAPE, (uint32_t(n) << 16) | uint32_t(k));
+  set_load_cfg(LOAD_W);
+  const size_t nbytes = size_t(k) * size_t(n);
+  const size_t nwords = (nbytes + 3) / 4;
+  auto* dst = reinterpret_cast<uint8_t*>(tx_virt_[tx_idx_]);
+  std::memcpy(dst, b, nbytes);
+  // Pad last word so DMA length is whole uint32s.
+  for (size_t i = nbytes; i < nwords * 4; ++i) dst[i] = 0;
+  sync_tx_to_device(tx_idx_, nwords * sizeof(uint32_t));
+  dma_wr(MM2S_DMASR, dma_rd(MM2S_DMASR));
+  dma_wr(MM2S_SA, tx_phys_[tx_idx_]);
+  dma_wr(MM2S_LENGTH, static_cast<uint32_t>(nwords * sizeof(uint32_t)));
+  wait_mm2s_idle();
+  tx_idx_ ^= 1;
 }
 
 void Device::load_tile_ab_mmio(const int8_t a[TILE_ELEMS], const int8_t b[TILE_ELEMS]) {
@@ -357,9 +378,47 @@ void Device::matmul_i8_legacy(const int8_t* a, const int8_t* b, int32_t* c, int 
   }
 }
 
+void Device::matmul_i8_wmem(const int8_t* a, const int8_t* b, int32_t* c, int m, int k, int n) {
+  load_weight_bank_dma(b, k, n);
+  std::memset(c, 0, size_t(m) * size_t(n) * sizeof(int32_t));
+  int8_t at[TILE_ELEMS];
+  int32_t ct[TILE_ELEMS];
+
+  for (int i0 = 0; i0 < m; i0 += TILE) {
+    for (int j0 = 0; j0 < n; j0 += TILE) {
+      bool first = true;
+      for (int k0 = 0; k0 < k; k0 += TILE) {
+        npu_wr(REG_TILE_KJ, (uint32_t(j0 / TILE) << 8) | uint32_t(k0 / TILE));
+        for (int r = 0; r < TILE; ++r)
+          std::memcpy(at + r * TILE, a + (i0 + r) * k + k0, TILE);
+        load_a_dma(at, true);
+        const uint32_t ctrl =
+            (first ? (CTRL_CLEAR | CTRL_START) : CTRL_START) | CTRL_USE_WMEM;
+        npu_wr(REG_CTRL, ctrl);
+        wait_gemm_done();
+        first = false;
+      }
+      read_tile_dma(ct);
+      for (int r = 0; r < TILE; ++r)
+        std::memcpy(c + (i0 + r) * n + j0, ct + r * TILE, TILE * sizeof(int32_t));
+    }
+  }
+}
+
 void Device::matmul_i8(const int8_t* a, const int8_t* b, int32_t* c, int m, int k, int n) {
   if (m % TILE || k % TILE || n % TILE)
     throw std::invalid_argument("M,K,N must be multiples of 8");
+
+  // Layer-resident W: one DMA of B, then A-only kicks. Opt in with NPUKIT_WMEM=1.
+  // On this 8×8 @ 100 MHz tiny-ViT, BFILL + A-only DMA loses to A∥B (~10 vs ~9.8 ms).
+  const char* wmem_env = std::getenv("NPUKIT_WMEM");
+  const bool force_wmem = wmem_env && wmem_env[0] == '1';
+  const bool use_wmem = force_wmem && weight_bank() && use_dma_ &&
+                        (size_t(k) * size_t(n) <= size_t(W_CAP));
+  if (use_wmem) {
+    matmul_i8_wmem(a, b, c, m, k, n);
+    return;
+  }
 
   // WS+PP is available when FEAT_WS|PP, but on this tiny 8×8 @ 100 MHz the
   // extra MM2S setups usually lose to a single A∥B transfer. Opt in with

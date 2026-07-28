@@ -1,0 +1,3 @@
+WNS=-1.574 ns (timing not met at 100 MHz; BRAM-inferred w_mem, functional smoke)
+pl_logic: LUT 9333, FF 9865, RAMB18=1 (w_mem)
+bit md5 29743bc988858a4f05e660852c3b0633

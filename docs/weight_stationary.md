@@ -1,6 +1,6 @@
-# Weight-stationary + A ping-pong (v3.1)
+# Weight-stationary + layer-resident weights
 
-`VERSION 0x301` / `FEATURES` bits:
+`VERSION 0x302` / `FEATURES` bits:
 
 | Bit | Name | Meaning |
 |-----|------|---------|
@@ -8,12 +8,36 @@
 | 1 | GLUE | Softmax / RMSNorm / residual / GELU |
 | 2 | WS | A-only / B-only AXIS loads (`LOAD_CFG`) |
 | 3 | PP | Dual-A banks; shadow fill while GEMM busy |
+| 4 | WMEM | Layer-resident weight bank (full `K×N` in BRAM) |
 
-## Why
+## Layer-resident weights (`FEAT_WMEM`)
 
-Legacy kicks always streamed **A∥B** (32×`uint32`) and only accepted AXIS when idle. That re-fetched weights every tile and serialized DMA behind compute — fine for bring-up, bad for latency on the A9.
+On-chip `w_mem` is a **RAMB18** word bank (≤1024 int8, e.g. 32×32). Host contract:
 
-## Host contract
+1. `W_SHAPE` @ `0x02C`: `[15:0]=K`, `[31:16]=N`
+2. `LOAD_CFG=3` (`LOAD_W`), DMA row-major `K×N` int8 once
+3. For each output tile / K-tile: set `TILE_KJ` @ `0x030`, DMA **A-only**, `CTRL` with `USE_WMEM` (`bit3`) + `START`
+
+RTL copies the selected 8×8 from `w_mem` → `b_mem` (sync BRAM read + BFILL) before the systolic feed.
+
+### Host policy (board-measured)
+
+On tiny-ViT @ 100 MHz, WMEM is **functionally correct** (`max|err|=0`) but **not faster** than A∥B (BFILL + split DMA overhead). Default stays legacy A∥B. Opt in:
+
+```bash
+NPUKIT_WMEM=1 sudo ./npukit_vit --weights vit_mnist.bin
+```
+
+| Path | Result |
+|------|--------|
+| ViT e2e WMEM | ~10.0 ms/img |
+| ViT e2e A∥B (`NPUKIT_WMEM` unset) | **~9.8 ms/img** |
+| 320× GEMM 8×8 WMEM | 8.8 ms |
+| 320× GEMM 8×8 A∥B | **6.4 ms** |
+
+Saved run: [`results/wmem_20260728T133256Z/`](../results/wmem_20260728T133256Z/).
+
+## Tile-level WS + A ping-pong (opt-in)
 
 `LOAD_CFG` @ `0x028`:
 
@@ -22,38 +46,13 @@ Legacy kicks always streamed **A∥B** (32×`uint32`) and only accepted AXIS whe
 | 0 | A then B (32 words) — legacy default |
 | 1 | A only (16 words) |
 | 2 | B only (16 words) |
-
-Weight-stationary matmul (C++ `Device::matmul_i8` when `FEAT_WS`):
-
-1. For each output tile `(i0,j0)` and each K-tile `k0`: load **B** (`LOAD_B`), load **A** (`LOAD_A`) unless already in the shadow bank.
-2. `CTRL` start (clear on first K-step).
-3. If `FEAT_PP` and another K-tile remains: start next **A** DMA into the shadow bank **while** GEMM runs; wait for both GEMM done and MM2S idle.
-
-Idle A fills update the active read bank; busy A-only fills update the inactive bank and set `STATUS[5]` (`shadow_a_ready`). `START` consumes the shadow (swap banks).
-
-## C++ driver
-
-- Prefers **XRT/zocl CMA** BOs (two TX + one RX) on PYNQ 3.x; legacy `/dev/xlnk` if present; else MMIO.
-- Old bitstreams (`VERSION < 0x301`, no `FEAT_WS`) keep the A∥B path automatically.
-
-## Host policy (C++)
-
-Default matmul path stays **legacy A∥B** (fastest on this 8×8 @ 100 MHz).
-
-Opt into WS+PP with:
+| 3 | Full weight bank (`K*N` bytes, padded to words) |
 
 ```bash
 NPUKIT_WS_PP=1 sudo ./npukit_vit --weights vit_mnist.bin
 ```
 
-(Requires `K > 8` so a shadow A prefetch exists.) Measured on tiny-ViT: forced WS+PP is parity-clean but **slower** than A∥B because MM2S setup dominates ~22-cycle compute — see board note.
+## Notes
 
-## Board note (tiny-ViT)
-
-WS+PP RTL/driver is in (`VERSION 0x301`, `FEATURES` includes `WS|PP`). For this MNIST model, keep the default A∥B path (~9–10 ms e2e). Next wins: layer-resident `W`, larger PE / `K`, or bigger demo model.
-
-## What this does *not* do yet
-
-- B is still single-buffered (cannot prefetch B during compute).
-- Weights are not stored for a whole layer in BRAM — only the current 8×8 B tile is held.
-- Full layer weight-stationary (preload all `W` once) is a follow-on.
+- Timing for the WMEM bitstream was **WNS ≈ −1.57 ns** at 100 MHz in the smoke build (still functionally clean on board). Closing timing is follow-on.
+- Old bitstreams (`VERSION < 0x302`) keep A∥B automatically.

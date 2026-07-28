@@ -29,6 +29,8 @@ constexpr uint32_t REG_GLUE_LEN = 0x01C;
 constexpr uint32_t REG_GLUE_PARAM = 0x020;
 constexpr uint32_t REG_GLUE_COUNT = 0x024;
 constexpr uint32_t REG_LOAD_CFG = 0x028;
+constexpr uint32_t REG_W_SHAPE = 0x02C;   // [15:0]=K [31:16]=N
+constexpr uint32_t REG_TILE_KJ = 0x030;   // [7:0]=k_tile [15:8]=j_tile
 
 constexpr uint32_t OFF_A = 0x100;
 constexpr uint32_t OFF_B = 0x200;
@@ -41,6 +43,7 @@ constexpr uint32_t OFF_GLUE_GAMMA = 0x800;
 constexpr uint32_t CTRL_START = 0x1;
 constexpr uint32_t CTRL_CLEAR = 0x2;
 constexpr uint32_t CTRL_TX_ARM = 0x4;
+constexpr uint32_t CTRL_USE_WMEM = 0x8;  // feed B from on-chip weight bank
 
 constexpr uint32_t STATUS_BUSY = 0x1;
 constexpr uint32_t STATUS_GEMM_DONE = 0x2;
@@ -48,13 +51,17 @@ constexpr uint32_t STATUS_GLUE_DONE = 0x10;
 
 constexpr uint32_t FEAT_GEMM = 0x1;
 constexpr uint32_t FEAT_GLUE = 0x2;
-constexpr uint32_t FEAT_WS = 0x4;   // weight-stationary: A-only / B-only AXIS loads
-constexpr uint32_t FEAT_PP = 0x8;   // dual-A ping-pong (shadow fill while busy)
+constexpr uint32_t FEAT_WS = 0x4;     // weight-stationary: A-only / B-only AXIS loads
+constexpr uint32_t FEAT_PP = 0x8;     // dual-A ping-pong (shadow fill while busy)
+constexpr uint32_t FEAT_WMEM = 0x10;  // layer-resident weight bank (LOAD_W)
 constexpr uint32_t ID_MAGIC = 0x4E50554Bu;  // "NPUK"
 
 constexpr uint32_t LOAD_AB = 0;  // 32 words A|B (legacy)
 constexpr uint32_t LOAD_A = 1;   // 16 words A-only
 constexpr uint32_t LOAD_B = 2;   // 16 words B-only
+constexpr uint32_t LOAD_W = 3;   // full K×N int8 weight bank
+
+constexpr int W_CAP = 1024;  // max K*N int8 in on-chip bank
 
 constexpr uint32_t STATUS_SHADOW_A = 0x20;
 

@@ -60,9 +60,10 @@ int main(int argc, char** argv) {
     if (!cpu_only) {
       dev = std::make_unique<npukit::Device>(use_dma);
       dptr = dev.get();
-      std::printf("  ID=0x%08X VERSION=0x%08X FEATURES=0x%08X DMA=%s WS=%d PP=%d\n",
+      std::printf("  ID=0x%08X VERSION=0x%08X FEATURES=0x%08X DMA=%s WS=%d PP=%d WMEM=%d\n",
                   dptr->id(), dptr->version(), dptr->features(), dptr->dma_backend_name(),
-                  dptr->weight_stationary() ? 1 : 0, dptr->ping_pong() ? 1 : 0);
+                  dptr->weight_stationary() ? 1 : 0, dptr->ping_pong() ? 1 : 0,
+                  dptr->weight_bank() ? 1 : 0);
 
     } else {
       std::printf("  GEMM=CPU (no /dev/mem)\n");

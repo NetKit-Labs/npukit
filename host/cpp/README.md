@@ -7,7 +7,7 @@ Userspace driver with **no Python in the GEMM kick loop**:
   - **XRT/zocl BO** on modern PYNQ 3.x (no `/dev/xlnk`)
   - legacy `libcma` + `/dev/xlnk` when present
   - MMIO fallback if neither works
-- **Weight-stationary + A ping-pong** in bitstream `VERSION ≥ 0x301` (`FEAT_WS|FEAT_PP`); host default stays A∥B (faster here). Opt in: `NPUKIT_WS_PP=1` — see [`docs/weight_stationary.md`](../../docs/weight_stationary.md)
+- **Layer-resident weights** in bitstream `VERSION ≥ 0x302` (`FEAT_WMEM`): load `W` once, stream A-only. Opt in: `NPUKIT_WMEM=1` (default stays A∥B — faster on tiny-ViT). Tile WS+PP: `NPUKIT_WS_PP=1` — see [`docs/weight_stationary.md`](../../docs/weight_stationary.md)
 - CPU DS-stem + float Softmax/RMSNorm/GELU helpers
 - Fabric glue MMIO for residual / Softmax / RMSNorm (`len ≤ 16`); GELU stays float when `mlp > 16`
 
@@ -75,16 +75,17 @@ Even so, the C kick loop dominates Python:
 |------|--------|
 | Python ViT FPGA e2e (pool + fast stem) | **~614 ms/img** |
 | Python DS-CNN int8 (numpy) | **~219 ms/img** |
-| C++ ViT e2e FPGA GEMM + float glue (**XRT CMA**, `VERSION 0x301`) | **~9.6 ms/img** |
+| C++ ViT e2e FPGA GEMM + float glue (**XRT CMA**, `VERSION 0x302` A∥B) | **~9.8 ms/img** |
+| Same with `NPUKIT_WMEM=1` | ~10.0 ms/img (correct, not faster here) |
 | C++ DS-CNN int8 peer (A9) | **~9.3 ms/img** |
 | C++ ViT e2e CPU GEMM on A9 | **~6.6 ms/img** |
-| 320 × GEMM 8×8 kicks (XRT CMA) | **~5.9 ms** |
+| 320 × GEMM 8×8 kicks A∥B / WMEM | **~6.4 / ~8.8 ms** |
 
-Fair peer race is C++ vs C++. Bitstream advertises `WS|PP`; host default stays A∥B (fastest here). `NPUKIT_WS_PP=1` exercises split loads + A shadow prefetch.
+Fair peer race is C++ vs C++. `VERSION 0x302` advertises `WMEM`; host default stays A∥B. See [`results/wmem_20260728T133256Z/`](../../results/wmem_20260728T133256Z/).
 
 Parity: ViT `max\|err\|=0` vs Python float-glue; DS-CNN float err ~1e-6 vs Python int8 numpy.
 
-CMA is via **XRT/zocl** (`DMA=xrt-cma`). Next fabric win: layer-resident weights.
+CMA is via **XRT/zocl** (`DMA=xrt-cma`).
 
 ## Notes
 

@@ -32,7 +32,7 @@ $$
 
 On NpuKit, $M$, $K$, and $N$ must be multiples of the hardware tile size $T = 8$.
 
-With `VERSION ≥ 0x301`, the host can stream **B-only** then **A-only** tiles (weight-stationary kick) and prefetch the next A into a shadow bank while the array runs (ping-pong). See [`weight_stationary.md`](weight_stationary.md).
+With `VERSION ≥ 0x302`, the host can preload a full `K×N` weight matrix into on-chip BRAM (`LOAD_W`) and stream only A tiles (`FEAT_WMEM`). `VERSION ≥ 0x301` also supports tile-level **B-only** / **A-only** loads and A ping-pong. See [`weight_stationary.md`](weight_stationary.md).
 
 ## Spatial tiles vs $K$ reduction
 
