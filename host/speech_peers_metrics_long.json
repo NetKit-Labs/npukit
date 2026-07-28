@@ -1,0 +1,69 @@
+{
+  "phrase_mode": "long",
+  "mel": {
+    "sr": 16000,
+    "n_fft": 512,
+    "hop": 256,
+    "overlap": 0.5,
+    "n_mels": 32,
+    "n_frames": 1023,
+    "target_samples": 262144
+  },
+  "token_t": 64,
+  "hybrid_stem": true,
+  "n_commands": 22,
+  "commands": [
+    "go left go right go forward stop on off",
+    "go right go left go forward stop on off",
+    "go forward go left go right stop on off",
+    "go left go forward go right stop on off",
+    "stop go left go right go forward on off",
+    "go left go right stop go forward on off",
+    "go left go right go forward on stop off",
+    "go left go right go forward off on stop",
+    "go up go down go left stop on off",
+    "go down go up go left stop on off",
+    "go left go up go down stop on off",
+    "go backward go forward go left stop on off",
+    "go forward go backward go left stop on off",
+    "follow left go right go forward stop on off",
+    "go left follow right go forward stop on off",
+    "learn left go right go forward stop on off",
+    "go left learn right go forward stop on off",
+    "visual on go left go right stop off learn",
+    "visual off go left go right stop on learn",
+    "yes go left no go right stop on off",
+    "no go left yes go right stop on off",
+    "go left yes go right no stop on off"
+  ],
+  "peers": [
+    {
+      "name": "A_fat_dscnn",
+      "accuracy": 0.8454545454545455,
+      "params": 102134,
+      "kib_fp32": 398.9609375,
+      "kib_int8_est": 99.740234375,
+      "ms_per_phrase": 30.126510449917987,
+      "notes": "full-phrase log-mel classifier (long canvas)"
+    },
+    {
+      "name": "B_kws_fsm",
+      "accuracy": 0.0,
+      "params": 28975,
+      "kib_fp32": 113.18359375,
+      "kib_int8_est": 28.2958984375,
+      "ms_per_phrase": 75.35619179980131,
+      "notes": "sliding-window KWS + longest command match FSM"
+    },
+    {
+      "name": "C_transformer_torch",
+      "accuracy": 0.5,
+      "params": 95296,
+      "kib_fp32": 372.25,
+      "kib_int8_est": 93.0625,
+      "ms_per_phrase": 21.789470850126236,
+      "notes": "hybrid DS-stem \u2192 T=64\u00d7D=32\u00d7L=6 \u2192 intent (Torch float GEMM)"
+    }
+  ],
+  "bit": null
+}

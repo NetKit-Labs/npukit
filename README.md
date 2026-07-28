@@ -28,8 +28,11 @@ Part of [NetKit Labs](https://github.com/NetKit-Labs) — companion to [netkit](
 | yes | Host MCU-class DS-CNN MNIST peer (int8 ~**98.4%** / ~8 KiB; vs MCU+NpuKit tiny-ViT ~**98.0%** / ~13 KiB) |
 | yes | Full board smoke with new weights: `host/npukit_board_smoke.ipynb` — **ALL SMOKE PASS**; ViT n=64 ref/hw **96.9%**, agree **100%** |
 | yes | Layer-resident weight bank (`VERSION 0x302`, `FEAT_WMEM`): load `W` once, A-only kicks — board correct; default host stays A∥B (faster on tiny-ViT) |
+| yes | Command-phrase tiny LM (text): T=32×D=32×L=6 + 30-way intent head — host intent **100%** — [`docs/command_lm.md`](docs/command_lm.md) |
+| yes | Speech peers (audio log-mel): short / long / fair races; fair order-only C **96.5%** vs A **27.8%** — [`docs/speech_peers.md`](docs/speech_peers.md) |
+| later | Board bring-up for command-LM / fair HT packs; close WMEM 100 MHz timing; MHA per-head scales |
 
-Status write-up (results + next path): **[`docs/STATUS.md`](docs/STATUS.md)**. Weight-stationary / WMEM: **[`docs/weight_stationary.md`](docs/weight_stationary.md)**.
+Status write-up (done + next): **[`docs/STATUS.md`](docs/STATUS.md)**. Speech peers: **[`docs/speech_peers.md`](docs/speech_peers.md)**. WMEM: **[`docs/weight_stationary.md`](docs/weight_stationary.md)**.
 
 ## Edge peers (MCU vs MCU+accelerator)
 
@@ -204,14 +207,14 @@ Simulate glue: `iverilog -g2012 -o sim/npukit_glue_tb.vvp rtl/npukit_glue.sv sim
 ## Visualize
 
 ```bash
-python3 viz/edge_peers_anim.py        # MCU DS-CNN vs tiny-ViT story → viz/out/edge_peers.gif
-python3 viz/systolic_anim.py          # Pillow GIF → viz/out/systolic_8x8.gif
-# or Manim (see viz/render_linkedin.sh)
+python3 viz/edge_peers_anim.py           # MCU DS-CNN vs tiny-ViT → viz/out/edge_peers.gif
+python3 viz/speech_peers_anim.py         # speech fair/long story → viz/out/speech_peers.gif
+python3 viz/hybrid_transformer_anim.py   # hybrid stem + transformer → viz/out/hybrid_transformer.gif
+python3 viz/systolic_anim.py             # Pillow systolic GIF
+viz/render_linkedin.sh                   # Manim LinkedIn square GIF/MP4 (needs viz/.venv)
 
 # Netron graphs (https://netron.app — Open Model / drag-and-drop):
-python3 host/export_netron.py         # → host/netron/*.onnx
-#   dscnn_mnist_peer.onnx     MCU DS-CNN benchmark (CPU)
-#   npukit_vit_system.onnx    CPU DS-stem + FPGA transformer + CPU head
+python3 host/export_netron.py            # → host/netron/*.onnx
 ```
 
 ## Layout
@@ -221,8 +224,8 @@ npukit/
   rtl/           pe, systolic_array, npukit_glue, npukit_axil, npukit_top, npukit_pl
   sim/           pe_tb, systolic_array_tb, npukit_axil_tb, npukit_glue_tb
   host/          matmul / transformer / e2e / vit_mnist / board_smoke / dscnn (+ train_*.py, weights)
-  docs/          STATUS.md, tiling.md, transformer_glue.md, transformer_split.md, glue_bringup.md
-  viz/           animation scripts
+  docs/          STATUS, speech_peers, command_lm, tiling, glue, WMEM, …
+  viz/           systolic / edge-peers / speech-peers / hybrid anims
   constraints/   pynq_z2.xdc (btn/led; clock from PS FCLK0)
   scripts/       create_project.tcl, build_bitstream.tcl, pynq_bitstream.tcl
   output/        bitstream artifacts (gitignored)

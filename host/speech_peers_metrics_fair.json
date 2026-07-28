@@ -1,0 +1,54 @@
+{
+  "phrase_mode": "fair",
+  "mel": {
+    "sr": 16000,
+    "n_fft": 512,
+    "hop": 256,
+    "overlap": 0.5,
+    "n_mels": 32,
+    "n_frames": 1023,
+    "target_samples": 262144
+  },
+  "token_t": 128,
+  "hybrid_stem": true,
+  "n_commands": 16,
+  "commands": [
+    "go left right forward stop on off learn",
+    "go right left forward stop on off learn",
+    "left go right forward stop on off learn",
+    "right go left forward stop on off learn",
+    "go left forward right stop on off learn",
+    "go forward left right stop on off learn",
+    "stop go left right forward on off learn",
+    "go left right stop forward on off learn",
+    "go left right forward on stop off learn",
+    "go left right forward off on stop learn",
+    "learn go left right forward stop on off",
+    "go learn left right forward stop on off",
+    "on off go left right forward stop learn",
+    "off on go left right forward stop learn",
+    "forward stop go left right on off learn",
+    "stop forward go left right on off learn"
+  ],
+  "peers": [
+    {
+      "name": "A_causal_dscnn",
+      "accuracy": 0.2775,
+      "params": 99849,
+      "kib_fp32": 390.03515625,
+      "kib_int8_est": 97.5087890625,
+      "ms_per_phrase": 16.72615625011531,
+      "notes": "causal DS-CNN; last time column only (no bag pool)"
+    },
+    {
+      "name": "C_transformer_torch",
+      "accuracy": 0.965,
+      "params": 97408,
+      "kib_fp32": 380.5,
+      "kib_int8_est": 95.125,
+      "ms_per_phrase": 15.4120437500751,
+      "notes": "hybrid DS-stem \u2192 T=128\u00d7D=32\u00d7L=6 \u2192 last-token + word-seq aux (Torch float GEMM)"
+    }
+  ],
+  "bit": null
+}

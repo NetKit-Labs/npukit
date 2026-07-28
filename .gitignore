@@ -17,10 +17,11 @@ output/*.bin
 output/*.ltx
 output/*.hwh
 
-# Visualization render artifacts
+# Visualization render artifacts (keep a few feed-ready GIFs / PDF)
 viz/out/*
 !viz/out/systolic_8x8_timesteps.pdf
 !viz/out/edge_peers.gif
+!viz/out/speech_peers.gif
 viz/.venv/
 viz/__pycache__/
 *.pyc
@@ -28,15 +29,21 @@ viz/__pycache__/
 # MNIST download cache (weights/samples under host/ are tracked)
 host/data/
 
+# Large regenerable speech-peer val mel caches (rebuild via host/speech_peers.py)
+host/speech_peers_val.npz
+host/speech_peers_val_fair.npz
+host/speech_peers_val_long.npz
+
 # C++ driver build artifacts / packed weight blob
 host/cpp/*.o
 host/cpp/src/*.o
 host/cpp/npukit_bench
 host/cpp/npukit_vit
 host/cpp/npukit_dscnn
+host/cpp/npukit_command_lm
 host/cpp/vit_mnist.bin
 host/cpp/dscnn_mnist.bin
-
+host/cpp/command_lm.bin
 
 # Editor / OS
 .DS_Store

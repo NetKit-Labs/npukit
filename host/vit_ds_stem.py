@@ -262,22 +262,79 @@ def _dequant_w(w_i8: np.ndarray, sw: np.ndarray) -> np.ndarray:
     return w_i8.astype(np.float32) / s
 
 
-def _conv2d_nchw(x, w, b, *, stride=1, padding=0, groups=1) -> np.ndarray:
-    """Small vectorized conv (NHWC in / out as NCHW here)."""
+def _float_weight_cache(s: StemInt8) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """Dequant int8 stem weights once per StemInt8 instance."""
+    cache = getattr(s, "_fw_cache", None)
+    if cache is not None:
+        return cache
+    cache = {
+        "stem": (_dequant_w(s.w_stem, s.sw_stem), np.asarray(s.b_stem, dtype=np.float32)),
+        "dw": (_dequant_w(s.w_dw, s.sw_dw), np.asarray(s.b_dw, dtype=np.float32)),
+        "pw": (_dequant_w(s.w_pw, s.sw_pw), np.asarray(s.b_pw, dtype=np.float32)),
+        "dw2": (_dequant_w(s.w_dw2, s.sw_dw2), np.asarray(s.b_dw2, dtype=np.float32)),
+        "pw2": (_dequant_w(s.w_pw2, s.sw_pw2), np.asarray(s.b_pw2, dtype=np.float32)),
+        "dw3": (_dequant_w(s.w_dw3, s.sw_dw3), np.asarray(s.b_dw3, dtype=np.float32)),
+        "pw3": (_dequant_w(s.w_pw3, s.sw_pw3), np.asarray(s.b_pw3, dtype=np.float32)),
+    }
+    object.__setattr__(s, "_fw_cache", cache)
+    return cache
+
+
+def _windows_nchw(x: np.ndarray, kh: int, kw: int, stride: int) -> np.ndarray:
     n, cin, _, _ = x.shape
-    cout, cg, kh, kw = w.shape
-    if padding:
-        x = np.pad(x, ((0, 0), (0, 0), (padding, padding), (padding, padding)))
     h_out = (x.shape[2] - kh) // stride + 1
     w_out = (x.shape[3] - kw) // stride + 1
     s0, s1, s2, s3 = x.strides
-    windows = np.lib.stride_tricks.as_strided(
+    return np.lib.stride_tricks.as_strided(
         x,
         shape=(n, cin, h_out, w_out, kh, kw),
         strides=(s0, s1, s2 * stride, s3 * stride, s2, s3),
         writeable=False,
     )
-    y = np.empty((n, cout, h_out, w_out), dtype=np.float32)
+
+
+def _conv3x3_nchw(x: np.ndarray, w: np.ndarray, b: np.ndarray, *, stride: int, padding: int) -> np.ndarray:
+    """Dense 3×3 conv via one einsum (no Python group loop)."""
+    if padding:
+        x = np.pad(x, ((0, 0), (0, 0), (padding, padding), (padding, padding)))
+    win = _windows_nchw(x, 3, 3, stride)
+    y = np.einsum("nchwab,ocab->nohw", win, w, optimize=True)
+    y += b.reshape(1, -1, 1, 1)
+    return y.astype(np.float32, copy=False)
+
+
+def _dw_conv3x3_nchw(x: np.ndarray, w: np.ndarray, b: np.ndarray, *, stride: int, padding: int) -> np.ndarray:
+    """Depthwise 3×3: w [C,1,3,3] → einsum over channels (no per-group tensordot)."""
+    if padding:
+        x = np.pad(x, ((0, 0), (0, 0), (padding, padding), (padding, padding)))
+    win = _windows_nchw(x, 3, 3, stride)
+    w3 = w[:, 0, :, :]
+    y = np.einsum("nchwab,cab->nchw", win, w3, optimize=True)
+    y += b.reshape(1, -1, 1, 1)
+    return y.astype(np.float32, copy=False)
+
+
+def _pw_conv1x1_nchw(x: np.ndarray, w: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Pointwise 1×1 as channel GEMM — skip im2col."""
+    y = np.einsum("nchw,oc->nohw", x, w[:, :, 0, 0], optimize=True)
+    y += b.reshape(1, -1, 1, 1)
+    return y.astype(np.float32, copy=False)
+
+
+def _conv2d_nchw(x, w, b, *, stride=1, padding=0, groups=1) -> np.ndarray:
+    """Small vectorized conv (kept for callers/tests; stem uses specialized paths)."""
+    cout, cg, kh, kw = w.shape
+    if groups == 1 and kh == 3 and kw == 3:
+        return _conv3x3_nchw(x, w, b, stride=stride, padding=padding)
+    if groups == cout and cg == 1 and kh == 3 and kw == 3:
+        return _dw_conv3x3_nchw(x, w, b, stride=stride, padding=padding)
+    if groups == 1 and kh == 1 and kw == 1:
+        return _pw_conv1x1_nchw(x, w, b)
+    n, cin, _, _ = x.shape
+    if padding:
+        x = np.pad(x, ((0, 0), (0, 0), (padding, padding), (padding, padding)))
+    windows = _windows_nchw(x, kh, kw, stride)
+    y = np.empty((n, cout, windows.shape[2], windows.shape[3]), dtype=np.float32)
     cout_g = cout // groups
     for g in range(groups):
         xg = windows[:, g * cg : (g + 1) * cg]
@@ -290,28 +347,35 @@ def _conv2d_nchw(x, w, b, *, stride=1, padding=0, groups=1) -> np.ndarray:
 
 
 def stem_forward_numpy(img28: np.ndarray, s: StemInt8, *, qat: bool = True) -> np.ndarray:
-    """One image → tokens float32 [T,C] (deploy-style fake-int8 if qat)."""
+    """One image → tokens float32 [T,C] (deploy-style fake-int8 if qat).
+
+    Fast path: cached float weights, specialized DW 3×3 / PW 1×1 (no TFLite).
+    """
     x = np.asarray(img28, dtype=np.float32).reshape(1, 1, IMG, IMG)
+    fw = _float_weight_cache(s)
 
-    def layer(x_in, w_i8, b, sw, sa, *, stride, padding, groups):
-        w = _dequant_w(w_i8, sw)
-        xin = _fq(x_in, sa) if qat else x_in
-        y = _conv2d_nchw(xin, w, b, stride=stride, padding=padding, groups=groups)
-        return np.maximum(y, 0.0)
+    def act(x_in: np.ndarray, sa: float) -> np.ndarray:
+        return _fq(x_in, sa) if qat else x_in
 
-    mid = s.w_stem.shape[0]
-    x = layer(x, s.w_stem, s.b_stem, s.sw_stem, s.sa_in, stride=2, padding=1, groups=1)
-    x = layer(x, s.w_dw, s.b_dw, s.sw_dw, s.sa_stem, stride=2, padding=1, groups=mid)
-    x = layer(x, s.w_pw, s.b_pw, s.sw_pw, s.sa_dw, stride=1, padding=0, groups=1)
-    x = layer(x, s.w_dw2, s.b_dw2, s.sw_dw2, s.sa_pw, stride=1, padding=1, groups=mid)
-    x = layer(x, s.w_pw2, s.b_pw2, s.sw_pw2, s.sa_dw2, stride=1, padding=0, groups=1)
-    x = layer(x, s.w_dw3, s.b_dw3, s.sw_dw3, s.sa_pw2, stride=1, padding=1, groups=mid)
-    x = layer(x, s.w_pw3, s.b_pw3, s.sw_pw3, s.sa_dw3, stride=1, padding=0, groups=1)
+    w, b = fw["stem"]
+    x = np.maximum(_conv3x3_nchw(act(x, s.sa_in), w, b, stride=2, padding=1), 0.0)
+    w, b = fw["dw"]
+    x = np.maximum(_dw_conv3x3_nchw(act(x, s.sa_stem), w, b, stride=2, padding=1), 0.0)
+    w, b = fw["pw"]
+    x = np.maximum(_pw_conv1x1_nchw(act(x, s.sa_dw), w, b), 0.0)
+    w, b = fw["dw2"]
+    x = np.maximum(_dw_conv3x3_nchw(act(x, s.sa_pw), w, b, stride=1, padding=1), 0.0)
+    w, b = fw["pw2"]
+    x = np.maximum(_pw_conv1x1_nchw(act(x, s.sa_dw2), w, b), 0.0)
+    w, b = fw["dw3"]
+    x = np.maximum(_dw_conv3x3_nchw(act(x, s.sa_pw2), w, b, stride=1, padding=1), 0.0)
+    w, b = fw["pw3"]
+    x = np.maximum(_pw_conv1x1_nchw(act(x, s.sa_dw3), w, b), 0.0)
     # pad 7→8, avg pool 2 → 4×4
     x = np.pad(x, ((0, 0), (0, 0), (0, 1), (0, 1)))
     x = x.reshape(1, x.shape[1], 4, 2, 4, 2).mean(axis=(3, 5))  # [1,C,4,4]
     ch = x.shape[1]
-    return x[0].reshape(ch, STEM_T).T.copy()
+    return np.ascontiguousarray(x[0].reshape(ch, STEM_T).T)
 
 
 def stem_forward_tflite(img28: np.ndarray, tflite_path: Path | None = None) -> np.ndarray:

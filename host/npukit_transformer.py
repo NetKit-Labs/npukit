@@ -465,29 +465,38 @@ def transformer_block_1layer(
     use_hw: bool = False,
     use_hw_gemm: bool | None = None,
     glue_mode: str | None = None,
-    verbose: bool = True,
+    verbose: bool = False,
     scale_act: float = SCALE_ACT,
     scale_w: ScaleW = SCALE_W,
     scale_p: float = SCALE_P,
+    causal: bool = False,
+    key_pad_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     """One pre-norm transformer block: attn + FFN. Shapes [T,D] Q12 in/out.
 
     GEMM may run on NPU (use_hw_gemm). Softmax/RMSNorm/GELU follow glue_mode:
       'hw' | 'q12' (LUT refs) | 'float' (A9 float32, preferred for ViT deploy).
     Legacy use_hw=True ⇒ GEMM+glue HW when glue_mode / use_hw_gemm unset.
+    Set causal=True for decoder/LM (mask future keys before Softmax).
+    key_pad_mask: optional bool [T] True=PAD key to mask.
     """
     x_q12 = np.asarray(x_q12, dtype=np.int32)
     t, d = x_q12.shape
     mlp_h = int(w.w1.shape[1])
     gmode = _resolve_glue_mode(use_hw=use_hw, glue_mode=glue_mode)
     gemm_hw = bool(use_hw if use_hw_gemm is None else use_hw_gemm)
-    # Softmax length=T ≤ MAX_LEN; model dim D for residual/RMSNorm.
-    assert t <= MAX_LEN and d <= MAX_LEN and d % 8 == 0 and t % 8 == 0
+    # HW glue Softmax/RMSNorm/GELU are capped at MAX_LEN; float/q12 may exceed.
+    assert d % 8 == 0 and t % 8 == 0
     assert w.w1.shape == (d, mlp_h) and w.w2.shape == (mlp_h, d)
-    if gmode == "hw" and mlp_h > MAX_LEN:
-        raise ValueError(
-            f"FFN hidden {mlp_h} > MAX_LEN={MAX_LEN}; use glue_mode='float'"
-        )
+    if gmode == "hw":
+        if t > MAX_LEN or d > MAX_LEN:
+            raise ValueError(
+                f"glue_mode='hw' needs T,D ≤ MAX_LEN={MAX_LEN}; got T={t} D={d}"
+            )
+        if mlp_h > MAX_LEN:
+            raise ValueError(
+                f"FFN hidden {mlp_h} > MAX_LEN={MAX_LEN}; use glue_mode='float'"
+            )
 
     dump: dict[str, np.ndarray] = {"x_in": x_q12.copy()}
 
@@ -523,6 +532,16 @@ def transformer_block_1layer(
 
     inv_sqrt = to_q12(np.array(1.0 / math.sqrt(d)))[()]
     scores = ((scores.astype(np.int64) * int(inv_sqrt)) >> Q12).astype(np.int32)
+    if causal or key_pad_mask is not None:
+        neg = np.iinfo(np.int32).min // 4
+        scores = scores.copy()
+        if causal:
+            fut = np.triu(np.ones((t, t), dtype=bool), k=1)
+            scores[fut] = neg
+        if key_pad_mask is not None:
+            pad = np.asarray(key_pad_mask, dtype=bool).reshape(-1)
+            assert pad.shape[0] == t
+            scores[:, pad] = neg
     dump["scores"] = scores.copy()
 
     p = _softmax_rows(glue, scores, glue_mode=gmode)

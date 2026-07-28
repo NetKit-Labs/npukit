@@ -53,12 +53,12 @@ inline void float_softmax_row(const int32_t* x_q12, int n, int32_t* out_q16) {
     if (v > m) m = v;
   }
   float sum = 0.f;
-  float e[MAX_LEN];
+  std::vector<float> e(static_cast<size_t>(n));
   for (int i = 0; i < n; ++i) {
-    e[i] = std::exp(from_q12(x_q12[i]) - m);
-    sum += e[i];
+    e[static_cast<size_t>(i)] = std::exp(from_q12(x_q12[i]) - m);
+    sum += e[static_cast<size_t>(i)];
   }
-  for (int i = 0; i < n; ++i) out_q16[i] = to_q16(e[i] / sum);
+  for (int i = 0; i < n; ++i) out_q16[i] = to_q16(e[static_cast<size_t>(i)] / sum);
 }
 
 inline void float_rmsnorm_row(const int32_t* x_q12, const int32_t* gamma_q12, int n,

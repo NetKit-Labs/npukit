@@ -104,7 +104,11 @@ def export_dscnn_tflite() -> Path:
     return DSCNN_TFLITE
 
 
-def export_stem_tflite(model: tv.TinyViT | None = None) -> Path:
+def export_stem_tflite(
+    model: tv.TinyViT | None = None,
+    *,
+    out_path: Path | None = None,
+) -> Path:
     """Tiny DS-stem → tokens [1,T,D] as TFLite float32."""
     if model is None:
         model = tv.TinyViT()
@@ -166,9 +170,10 @@ def export_stem_tflite(model: tv.TinyViT | None = None) -> Path:
     converter = tf.lite.TFLiteConverter.from_keras_model(km)
     converter.optimizations = []
     buf = converter.convert()
-    STEM_TFLITE.write_bytes(buf)
-    print(f"wrote {STEM_TFLITE} ({len(buf)} bytes)")
-    return STEM_TFLITE
+    dest = Path(out_path) if out_path is not None else STEM_TFLITE
+    dest.write_bytes(buf)
+    print(f"wrote {dest} ({len(buf)} bytes)")
+    return dest
 
 
 def main() -> int:

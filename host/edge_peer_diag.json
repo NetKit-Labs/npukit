@@ -1,0 +1,57 @@
+{
+  "accuracy": {
+    "vit": {
+      "float_dequant_acc": 0.647,
+      "proxy_qat_acc": 0.6641,
+      "deploy_numpy_acc": 0.9428,
+      "deploy_numpy_n": 10000,
+      "n_params_float": 4448,
+      "n_params_i8": 4128,
+      "n_params_q12": 320,
+      "n_params_total": 4448,
+      "bytes_i8": 4128,
+      "bytes_q12": 1280,
+      "kib_deploy": 5.28125,
+      "kib_i8_only": 4.03125,
+      "geometry": "T=16 D=16 L=2 patch=7 no-CNN-stem"
+    },
+    "dscnn": {
+      "float_acc": 0.98,
+      "int8_acc": 0.9839,
+      "metrics_json": {
+        "test_acc_float": 0.98,
+        "test_acc_int8": 0.9839,
+        "n_params": 9034,
+        "n_test": 10000,
+        "epochs": 6,
+        "qat_epochs": 3,
+        "notes": "MCU-class host DS-CNN (BN-fold, per-tensor fake-int8, STE QAT); peer vs MCU+NpuKit ViT deploy-quant ~94.28% (accuracy+KiB+compute locus)",
+        "test_acc": 0.9839
+      },
+      "n_params_float": 9034,
+      "n_params_i8": 8448,
+      "n_params_bias": 0,
+      "n_params_total": 8448,
+      "bytes_i8": 8448,
+      "bytes_bias": 0,
+      "kib_deploy": 8.25,
+      "kib_i8_only": 8.25
+    }
+  },
+  "bench": {
+    "bench_n": 64,
+    "dscnn_int8_cpu_ms_per_image_single": 230.23899543750304,
+    "dscnn_int8_cpu_ms_per_image_over_batch": 212.7987779531395,
+    "vit_deploy_numpy_cpu_ms_per_image": 118.37318900006721,
+    "vit_fpga_ms_per_image_single": 976.5544355000202,
+    "vit_fpga_ms_per_image_over_batch": 986.8848518906361,
+    "vit_fpga_batch_label_acc": 0.953125,
+    "note": "A9 host; DS-CNN = numpy int8 on CPU (no torch); ViT FPGA includes host schedule + DMA/MMIO + glue"
+  },
+  "vit_train_log_notes": {
+    "float_warmup_peak_test_acc_pct": 86.79,
+    "source": "/tmp/train_vit_mnist.log float epoch 21",
+    "deploy_numpy_headline_pct": 94.28,
+    "interpretation": "Float warm-up never reached DS-CNN territory; deploy-FT raised numpy/FPGA path above dequant-float of same weights."
+  }
+}

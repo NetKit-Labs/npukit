@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Animated LinkedIn/README GIF: MCU DS-CNN vs MCU+NpuKit tiny-ViT.
+"""Animated LinkedIn GIF: MNIST digits results (no intro title slide).
 
-Story beats (MNIST edge peers — not a param bake-off):
-  1) NpuKit hardware (GEMM + glue)
-  2) Two peers on the same task
-  3) DS-CNN = MCU-class TinyML (~98% int8)
-  4) Tiny-ViT: CPU DS-stem + FPGA int8 GEMM + A9 float norms (~97.4%)
-  5) Compare accuracy / KiB / where compute runs
+Beats:
+  1) Fabric + FPGA util
+  2) Tiny-ViT geometry / params
+  3) Deploy split (CPU stem + FPGA GEMM + A9 float)
+  4) DS-CNN peer vs ViT accuracy / KiB
+  5) Inference latency (A9 bench)
+  6) Board smoke result
 
 Usage:
   python3 viz/edge_peers_anim.py
@@ -21,9 +22,9 @@ import imageio.v2 as imageio
 from PIL import Image, ImageDraw, ImageFont
 
 W, H = 1080, 1080
-FPS = 10
-HOLD = 14  # frames per beat (~1.4s)
-FADE = 4
+FPS = 6
+HOLD = 24  # ~4s per beat at 6 fps
+FADE = 6
 
 BG = (12, 18, 28)
 PANEL = (20, 28, 42)
@@ -32,9 +33,7 @@ TITLE = (245, 248, 252)
 MUTED = (140, 156, 178)
 MINT = (80, 200, 180)
 AMBER = (240, 170, 70)
-CORAL = (230, 120, 100)
 OK = (120, 210, 160)
-LINE = (48, 62, 84)
 
 OUT_DIR = Path(__file__).resolve().parent / "out"
 GIF_PATH = OUT_DIR / "edge_peers.gif"
@@ -81,154 +80,271 @@ def rounded(d: ImageDraw.ImageDraw, xy, fill, r: int = 28) -> None:
     d.rounded_rectangle(xy, radius=r, fill=fill)
 
 
-def draw_chip(d: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int, label: str, sub: str, accent) -> None:
+def draw_chip(
+    d: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int, label: str, sub: str, accent
+) -> None:
     rounded(d, (x, y, x + w, y + h), PANEL, 24)
     d.rounded_rectangle((x, y, x + 10, y + h), radius=4, fill=accent)
-    d.text((x + 28, y + 22), label, font=font(34, True), fill=TITLE)
-    d.text((x + 28, y + 70), sub, font=font(24), fill=MUTED)
+    d.text((x + 28, y + 22), label, font=font(32, True), fill=TITLE)
+    d.text((x + 28, y + 72), sub, font=font(24), fill=MUTED)
 
 
-def scene_title(alpha: float = 1.0) -> Image.Image:
+def scene_fabric(progress: float) -> Image.Image:
     im, d = new_frame()
-    text_center(d, 320, "NpuKit", font(72, True), TITLE)
-    text_center(d, 420, "FPGA mini-NPU on PYNQ-Z2", font(36), MINT)
-    text_center(d, 500, "8×8 int8 systolic GEMM  ·  transformer glue", font(28), MUTED)
-    text_center(d, 700, "Edge peers on MNIST", font(32, True), AMBER)
-    if alpha < 1.0:
-        overlay = Image.new("RGB", (W, H), BG)
-        im = Image.blend(overlay, im, alpha)
-    return im
+    text_center(d, 60, "PYNQ-Z2  ·  Zynq-7020 fabric", font(40, True))
+    text_center(d, 120, "MNIST digits  ·  100 MHz  ·  VERSION 0x300", font(26), MUTED)
 
-
-def scene_hw(progress: float) -> Image.Image:
-    im, d = new_frame()
-    text_center(d, 80, "What’s on the fabric", font(44, True))
-    y0 = 220
-    # GEMM block slides in
+    y0 = 200
     gx = int(lerp(-40, 90, ease(min(1.0, progress * 1.4))))
-    draw_chip(d, gx, y0, 900, 160, "8×8 int8 systolic GEMM", "output-stationary · AXI DMA / MMIO tiling", MINT)
-    # Glue block
-    gx2 = int(lerp(-40, 90, ease(max(0.0, progress * 1.4 - 0.25))))
+    draw_chip(
+        d,
+        gx,
+        y0,
+        900,
+        150,
+        "8×8 int8 systolic GEMM",
+        "output-stationary · host-tiled DMA / MMIO",
+        MINT,
+    )
+    gx2 = int(lerp(-40, 90, ease(max(0.0, progress * 1.4 - 0.2))))
     draw_chip(
         d,
         gx2,
-        y0 + 200,
+        y0 + 180,
         900,
-        160,
-        "Transformer glue  (MAX_LEN=16)",
-        "residual · GELU · RMSNorm · Softmax  @ 100 MHz",
+        150,
+        "Transformer glue (optional)",
+        "residual · GELU · RMSNorm · Softmax  ·  MAX_LEN=16",
         AMBER,
     )
-    text_center(d, 920, "A9 host: quant, scales, schedule, RoPE / masks", font(26), MUTED)
+
+    # Util strip
+    cy = int(lerp(1100, 600, ease(max(0.0, progress * 1.2 - 0.3))))
+    rounded(d, (90, cy, 990, cy + 320), PANEL2, 24)
+    d.text((130, cy + 28), "Placed utilization", font=font(30, True), fill=TITLE)
+    util = [
+        ("LUT", "~18%", "9.6k / 53.2k"),
+        ("FF", "~12%", "12.9k / 106k"),
+        ("DSP", "~33%", "72 / 220"),
+        ("BRAM", "~1.4%", "2 / 140"),
+    ]
+    for i, (name, pct, detail) in enumerate(util):
+        x = 130 + (i % 2) * 420
+        y = cy + 90 + (i // 2) * 100
+        d.text((x, y), name, font=font(26, True), fill=MUTED)
+        d.text((x + 110, y), pct, font=font(34, True), fill=MINT if name == "DSP" else OK)
+        d.text((x + 110, y + 42), detail, font=font(22), fill=MUTED)
     return im
 
 
-def scene_split(progress: float) -> Image.Image:
+def scene_params(progress: float) -> Image.Image:
     im, d = new_frame()
-    text_center(d, 70, "Same task · two deployments", font(42, True))
-    text_center(d, 130, "MNIST  ·  not a param-matched bake-off", font(26), MUTED)
+    text_center(d, 60, "Tiny-ViT parameters (digits)", font(40, True))
+    text_center(d, 120, "native 28×28  ·  no resize", font(26), MUTED)
 
-    slide = ease(progress)
-    left_x = int(lerp(-500, 70, slide))
-    right_x = int(lerp(W + 40, 560, slide))
-
-    # Left: MCU CNN
-    rounded(d, (left_x, 240, left_x + 450, 820), PANEL, 28)
-    d.text((left_x + 36, 280), "MCU path", font=font(28, True), fill=MINT)
-    d.text((left_x + 36, 340), "DS-CNN", font=font(48, True), fill=TITLE)
-    d.text((left_x + 36, 420), "TinyML depthwise-\nseparable CNN", font=font(28), fill=MUTED)
-    d.text((left_x + 36, 560), "int8  ~98.4%", font=font(36, True), fill=OK)
-    d.text((left_x + 36, 620), "~8.3 KiB weights", font=font(28), fill=MUTED)
-    d.text((left_x + 36, 700), "runs on MCU-class host\n(not mapped to FPGA)", font=font(24), fill=MUTED)
-
-    # Right: ViT + accel
-    rounded(d, (right_x, 240, right_x + 450, 820), PANEL, 28)
-    d.text((right_x + 36, 280), "MCU/MPU + NpuKit", font=font(28, True), fill=AMBER)
-    d.text((right_x + 36, 340), "Tiny-ViT", font=font(48, True), fill=TITLE)
-    d.text((right_x + 36, 420), "T=16 · D=16 · L=4\nMLP=32  deploy-quant", font=font(28), fill=MUTED)
-    d.text((right_x + 36, 560), "quant  ~97.4%", font=font(36, True), fill=OK)
-    d.text((right_x + 36, 620), "~11.5 KiB weights", font=font(28), fill=MUTED)
-    d.text((right_x + 36, 700), "int8 GEMM on FPGA\nstem+norms on A9", font=font(24), fill=MUTED)
+    rows = [
+        ("Input", "28×28 grayscale MNIST"),
+        ("CPU DS-stem", "MID=24 → D=16 tokens (T=16)"),
+        ("Body", "T=16 · D=16 · MLP=32 · L=4"),
+        ("Quant", "int8 GEMM + per-channel W scales"),
+        ("Norms", "Softmax / RMSNorm / GELU on A9 float"),
+        ("Size", "~12.2k params  ·  ~13 KiB weights"),
+        ("Head", "10-class linear on CPU"),
+    ]
+    top = 190
+    for ri, (k, v) in enumerate(rows):
+        t = ease(max(0.0, min(1.0, progress * 1.5 - ri * 0.08)))
+        if t <= 0:
+            continue
+        y = top + ri * 100
+        rounded(d, (80, y, 1000, y + 84), PANEL, 18)
+        d.text((110, y + 24), k, font=font(26, True), fill=MUTED)
+        d.text((340, y + 24), v, font=font(26, True), fill=TITLE)
     return im
 
 
 def scene_split_compute(progress: float) -> Image.Image:
     im, d = new_frame()
-    text_center(d, 80, "ViT deploy split (this kit)", font(42, True))
-    text_center(d, 150, "int8 where the flops are · float where it helps", font(28), MUTED)
+    text_center(d, 70, "Where compute runs", font(42, True))
+    text_center(d, 130, "CPU/FPGA combo for the ViT peer", font(28), MUTED)
 
     boxes = [
         ("28×28", "image"),
-        ("DS-stem", "CPU int8"),
-        ("GEMM body", "FPGA int8"),
+        ("DS-stem", "A9 int8"),
+        ("GEMM", "FPGA int8"),
         ("norms", "A9 float"),
+        ("head", "A9"),
     ]
     n = len(boxes)
     for i, (a, b) in enumerate(boxes):
-        t = ease(max(0.0, min(1.0, progress * 1.5 - i * 0.12)))
-        x = 100 + i * 230
-        y = 320
-        rounded(d, (x, y, x + 200, y + 160), PANEL if t > 0.05 else BG, 20)
+        t = ease(max(0.0, min(1.0, progress * 1.5 - i * 0.1)))
+        x = 55 + i * 200
+        y = 280
+        rounded(d, (x, y, x + 180, y + 170), PANEL if t > 0.05 else BG, 20)
         if t > 0.2:
-            d.text((x + 20, y + 36), a, font=font(26, True), fill=TITLE)
-            d.text((x + 20, y + 90), b, font=font(22), fill=MUTED)
+            d.text((x + 18, y + 40), a, font=font(26, True), fill=TITLE)
+            d.text((x + 18, y + 100), b, font=font(22), fill=MINT if "FPGA" in b else MUTED)
         if i < n - 1 and t > 0.5:
             d.polygon(
-                [(x + 208, y + 70), (x + 228, y + 80), (x + 208, y + 90)],
-                fill=MINT,
+                [(x + 186, y + 75), (x + 198, y + 85), (x + 186, y + 95)],
+                fill=AMBER,
             )
 
-    cy = int(lerp(1100, 620, ease(max(0.0, progress * 1.2 - 0.35))))
-    rounded(d, (120, cy, 960, cy + 220), (28, 36, 32), 24)
-    d.text((160, cy + 36), "Keep GEMM on the NPU", font=font(40, True), fill=MINT)
+    cy = int(lerp(1100, 560, ease(max(0.0, progress * 1.2 - 0.35))))
+    rounded(d, (90, cy, 990, cy + 280), PANEL2, 24)
+    d.text((130, cy + 36), "Design choice", font=font(32, True), fill=AMBER)
     d.text(
-        (160, cy + 100),
-        "Tiny CPU DS-stem + Softmax/RMSNorm/GELU on A9 float32.\n"
-        "Transformer matmuls stay int8 on the systolic array.",
+        (130, cy + 100),
+        "Keep the heavy matmuls on the 8×8 systolic array.\n"
+        "Tiny DS-stem + Softmax/RMSNorm/GELU stay on the A9\n"
+        "in float — better accuracy than LUT glue for this size.",
         font=font(26),
         fill=TITLE,
     )
     return im
 
 
-def scene_table(progress: float) -> Image.Image:
+def scene_peers(progress: float) -> Image.Image:
     im, d = new_frame()
-    text_center(d, 70, "Compare what matters", font(42, True), TITLE)
-    text_center(d, 130, "accuracy  ·  footprint  ·  where compute runs", font(26), MUTED)
+    text_center(d, 60, "MNIST edge peers", font(42, True))
+    text_center(d, 120, "same digits task · not a param-matched bake-off", font(26), MUTED)
 
-    rows = [
-        ("", "DS-CNN (MCU)", "Tiny-ViT (NpuKit)"),
-        ("Task", "MNIST", "MNIST"),
-        ("Deploy shape", "host int8 TinyML", "FPGA GEMM + A9"),
-        ("Accuracy", "~98.4% int8", "~97.4% quant"),
-        ("Weights", "~8.3 KiB", "~11.5 KiB"),
-        ("Front-end", "is the CNN", "tiny DS-stem"),
-    ]
-    top = 220
-    col_x = [80, 320, 700]
-    for ri, row in enumerate(rows):
-        t = ease(max(0.0, min(1.0, progress * 1.6 - ri * 0.08)))
-        if t <= 0:
-            continue
-        y = top + ri * 90
-        bg = PANEL2 if ri == 0 else PANEL
-        rounded(d, (60, y, 1020, y + 78), bg, 16)
-        for ci, cell in enumerate(row):
-            fill = MINT if ri == 0 and ci > 0 else (AMBER if ri == 0 else TITLE)
-            if ri > 0 and ci == 0:
-                fill = MUTED
-            d.text((col_x[ci], y + 22), cell, font=font(26, bold=(ri == 0 or ci == 0)), fill=fill)
+    slide = ease(progress)
+    left_x = int(lerp(-500, 70, slide))
+    right_x = int(lerp(W + 40, 560, slide))
+
+    rounded(d, (left_x, 200, left_x + 450, 860), PANEL, 28)
+    d.text((left_x + 36, 240), "MCU-class peer", font=font(26, True), fill=MINT)
+    d.text((left_x + 36, 300), "DS-CNN", font=font(48, True), fill=TITLE)
+    d.text((left_x + 36, 380), "depthwise-separable CNN\nhost int8 TinyML", font=font(26), fill=MUTED)
+    d.text((left_x + 36, 520), "98.39%", font=font(52, True), fill=OK)
+    d.text((left_x + 36, 590), "full 10k test · int8", font=font(24), fill=MUTED)
+    d.text((left_x + 36, 680), "~9.0k params", font=font(28, True), fill=TITLE)
+    d.text((left_x + 36, 740), "~8.3 KiB weights", font=font(28), fill=MUTED)
+    d.text((left_x + 36, 800), "CPU only · not on FPGA", font=font(24), fill=MUTED)
+
+    rounded(d, (right_x, 200, right_x + 450, 860), PANEL, 28)
+    d.text((right_x + 36, 240), "CPU + NpuKit", font=font(26, True), fill=AMBER)
+    d.text((right_x + 36, 300), "Tiny-ViT", font=font(48, True), fill=TITLE)
+    d.text((right_x + 36, 380), "DS-stem + FPGA GEMM\n+ A9 float norms", font=font(26), fill=MUTED)
+    d.text((right_x + 36, 520), "97.98%", font=font(52, True), fill=OK)
+    d.text((right_x + 36, 590), "full 10k · deploy-quant", font=font(24), fill=MUTED)
+    d.text((right_x + 36, 680), "~12.2k params", font=font(28, True), fill=TITLE)
+    d.text((right_x + 36, 740), "~13 KiB weights", font=font(28), fill=MUTED)
+    d.text((right_x + 36, 800), "board: ALL VIT PASS", font=font(24), fill=MUTED)
     return im
 
 
-def scene_end(progress: float) -> Image.Image:
+def scene_latency(progress: float) -> Image.Image:
     im, d = new_frame()
-    text_center(d, 300, "Board bring-up", font(48, True))
-    text_center(d, 380, "npukit_board_smoke.ipynb", font(32), MINT)
+    text_center(d, 60, "Inference time (A9 host)", font(42, True))
+    text_center(d, 120, "PYNQ-Z2  ·  n=64  ·  includes host schedule / DMA", font(26), MUTED)
+
+    rows = [
+        ("Path", "ms / image"),
+        ("DS-CNN int8 CPU (single)", "~230 ms"),
+        ("DS-CNN int8 CPU (batch avg)", "~213 ms"),
+        ("ViT deploy numpy CPU", "~118 ms"),
+        ("ViT FPGA end-to-end", "~977 ms"),
+    ]
+    top = 220
+    for ri, (a, b) in enumerate(rows):
+        t = ease(max(0.0, min(1.0, progress * 1.5 - ri * 0.1)))
+        if t <= 0:
+            continue
+        y = top + ri * 100
+        bg = PANEL2 if ri == 0 else PANEL
+        rounded(d, (80, y, 1000, y + 84), bg, 18)
+        fill_a = MINT if ri == 0 else TITLE
+        fill_b = MINT if ri == 0 else (AMBER if "FPGA" in a else OK)
+        d.text((120, y + 24), a, font=font(28, True if ri == 0 else False), fill=fill_a)
+        d.text((720, y + 24), b, font=font(30, True), fill=fill_b)
+
+    text_center(
+        d,
+        780,
+        "FPGA path = stem + tiled GEMM + norms + head (not PE-only)",
+        font(24),
+        MUTED,
+    )
+    text_center(
+        d,
+        840,
+        "Untuned host schedule — latency is honest, not marketing FLOPs",
+        font(24),
+        MUTED,
+    )
+    return im
+
+
+def scene_board(progress: float) -> Image.Image:
+    im, d = new_frame()
+    text_center(d, 80, "Board smoke (digits)", font(42, True))
+    text_center(d, 150, "npukit_board_smoke.ipynb  ·  same bitstream", font(26), MUTED)
+
     mark = ease(progress)
-    text_center(d, 520, "ALL SMOKE PASS", font(52, True), OK if mark > 0.3 else MUTED)
-    text_center(d, 620, "matmul · glue · e2e · ViT", font(28), MUTED)
-    text_center(d, 820, "github.com/NetKit-Labs/npukit", font(26), AMBER)
+    text_center(d, 280, "ALL SMOKE PASS", font(56, True), OK if mark > 0.25 else MUTED)
+    text_center(d, 360, "matmul · glue · e2e · ViT", font(28), MUTED)
+
+    rounded(d, (120, 460, 960, 860), PANEL, 24)
+    lines = [
+        ("ViT sample n=64", "61/64 (95.3%) ref & hw"),
+        ("ref ↔ hw agree", "64/64 (100%)"),
+        ("tensor max|err|", "0  (GEMM bit-exact vs numpy)"),
+        ("Full 10k deploy-quant", "97.98%"),
+        ("vs DS-CNN int8", "−0.41 pp  ·  +~5 KiB"),
+    ]
+    for i, (k, v) in enumerate(lines):
+        y = 500 + i * 60
+        d.text((160, y), k, font=font(26), fill=MUTED)
+        d.text((520, y), v, font=font(26, True), fill=TITLE)
+    return im
+
+
+def scene_why(progress: float) -> Image.Image:
+    """Story beat: small FPGA + tiny transformer → sequential-data upside."""
+    im, d = new_frame()
+    text_center(d, 60, "Why a tiny transformer on cheap FPGA?", font(36, True))
+    text_center(d, 120, "digits prove the path · sequence work is the upside", font(26), MUTED)
+
+    # Left: small silicon
+    t0 = ease(min(1.0, progress * 1.3))
+    lx = int(lerp(-480, 70, t0))
+    rounded(d, (lx, 200, lx + 450, 520), PANEL, 28)
+    d.text((lx + 36, 240), "Small · low-cost FPGA", font=font(28, True), fill=MINT)
+    d.text(
+        (lx + 36, 310),
+        "Zynq-7020 class board\n~18% LUT · ~33% DSP\n8×8 int8 GEMM fits with\nheadroom to spare",
+        font=font(26),
+        fill=TITLE,
+    )
+
+    # Right: tiny model
+    t1 = ease(max(0.0, progress * 1.3 - 0.15))
+    rx = int(lerp(W + 40, 560, t1))
+    rounded(d, (rx, 200, rx + 450, 520), PANEL, 28)
+    d.text((rx + 36, 240), "Tiny transformer", font=font(28, True), fill=AMBER)
+    d.text(
+        (rx + 36, 310),
+        "~12k params · ~13 KiB\nT=16 · D=16 · L=4\nsame size class as a\nTinyML CNN peer",
+        font=font(26),
+        fill=TITLE,
+    )
+
+    # Bottom: sequential upside
+    cy = int(lerp(1100, 580, ease(max(0.0, progress * 1.2 - 0.35))))
+    rounded(d, (70, cy, 1010, cy + 360), PANEL2, 24)
+    d.text((110, cy + 28), "Where transformers win", font=font(32, True), fill=OK)
+    d.text(
+        (110, cy + 90),
+        "Attention is built for sequential / contextual data —\n"
+        "tokens that depend on each other across time or space.\n\n"
+        "MNIST is the smoke test. The same GEMM + tiny block\n"
+        "is a path to sensor streams, short audio, control traces,\n"
+        "and other edge sequences CNNs handle less naturally.",
+        font=font(26),
+        fill=TITLE,
+    )
     return im
 
 
@@ -246,36 +362,43 @@ def main() -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     frames: list[Image.Image] = []
 
-    s0 = scene_title()
-    hold(frames, s0, HOLD + 4)
-
-    s1 = scene_hw(1.0)
-    # build-up of hw scene
-    for i in range(HOLD):
-        frames.append(scene_hw((i + 1) / HOLD))
-    hold(frames, s1, 6)
-    crossfade(frames, s1, scene_split(1.0))
+    # No intro title slide — start on fabric/util meat.
+    for i in range(HOLD + 4):
+        frames.append(scene_fabric((i + 1) / (HOLD + 4)))
+    s0 = scene_fabric(1.0)
+    hold(frames, s0, 8)
 
     for i in range(HOLD + 4):
-        frames.append(scene_split(min(1.0, (i + 1) / 10)))
-    s2 = scene_split(1.0)
-    hold(frames, s2, 8)
+        frames.append(scene_params((i + 1) / (HOLD + 4)))
+    s1 = scene_params(1.0)
+    hold(frames, s1, 8)
+    crossfade(frames, s1, scene_split_compute(1.0))
 
     for i in range(HOLD + 6):
         frames.append(scene_split_compute((i + 1) / (HOLD + 6)))
-    s3 = scene_split_compute(1.0)
+    s2 = scene_split_compute(1.0)
+    hold(frames, s2, 8)
+
+    for i in range(HOLD + 4):
+        frames.append(scene_peers(min(1.0, (i + 1) / 12)))
+    s3 = scene_peers(1.0)
     hold(frames, s3, 10)
 
     for i in range(HOLD + 4):
-        frames.append(scene_table((i + 1) / (HOLD + 4)))
-    s4 = scene_table(1.0)
+        frames.append(scene_latency((i + 1) / (HOLD + 4)))
+    s4 = scene_latency(1.0)
     hold(frames, s4, 10)
 
     for i in range(HOLD):
-        frames.append(scene_end((i + 1) / HOLD))
-    hold(frames, scene_end(1.0), HOLD + 6)
+        frames.append(scene_board((i + 1) / HOLD))
+    s5 = scene_board(1.0)
+    hold(frames, s5, HOLD + 4)
+    crossfade(frames, s5, scene_why(1.0))
 
-    # Write GIF (Pillow) — LinkedIn-friendly scale 720²
+    for i in range(HOLD + 6):
+        frames.append(scene_why((i + 1) / (HOLD + 6)))
+    hold(frames, scene_why(1.0), HOLD + 8)
+
     scaled = [fr.resize((720, 720), Image.Resampling.LANCZOS) for fr in frames]
     imageio.mimsave(GIF_PATH, scaled, fps=FPS, loop=0)
     print(f"wrote {GIF_PATH}  frames={len(scaled)}  size={GIF_PATH.stat().st_size // 1024} KiB")

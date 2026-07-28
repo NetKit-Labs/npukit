@@ -1,0 +1,11 @@
+{
+  "model": "Hybrid Transformer (fair order-only)",
+  "geometry": "T=128 D=32 L=6",
+  "head": "last-token",
+  "torch_acc_export_subset": 0.96875,
+  "cpu_i8_acc": 0.96875,
+  "cpu_i8_ms": 1966.5034562499386,
+  "fpga_i8_acc": 1.0,
+  "fpga_i8_ms": 30939.03147500023,
+  "bit": "/home/xilinx/jupyter_notebooks/npukit.bit"
+}

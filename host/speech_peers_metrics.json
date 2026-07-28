@@ -1,0 +1,84 @@
+{
+  "mel": {
+    "sr": 16000,
+    "n_fft": 512,
+    "hop": 256,
+    "overlap": 0.5,
+    "n_mels": 32,
+    "n_frames": 127,
+    "target_samples": 32768
+  },
+  "n_commands": 22,
+  "commands": [
+    "stop",
+    "on",
+    "off",
+    "up",
+    "down",
+    "left",
+    "right",
+    "forward",
+    "backward",
+    "follow forward",
+    "go left",
+    "go right",
+    "go up",
+    "go down",
+    "go forward",
+    "go backward",
+    "visual on",
+    "visual off",
+    "learn left",
+    "learn right",
+    "yes go",
+    "no stop"
+  ],
+  "peers": [
+    {
+      "name": "A_fat_dscnn",
+      "accuracy": 0.9201474201474201,
+      "params": 37734,
+      "kib_fp32": 147.3984375,
+      "kib_int8_est": 36.849609375,
+      "ms_per_phrase": 1.8489375000172004,
+      "notes": "full-phrase log-mel classifier"
+    },
+    {
+      "name": "B_kws_fsm",
+      "accuracy": 0.257985257985258,
+      "params": 28975,
+      "kib_fp32": 113.18359375,
+      "kib_int8_est": 28.2958984375,
+      "ms_per_phrase": 13.3508541500305,
+      "notes": "sliding-window KWS + longest command match FSM"
+    },
+    {
+      "name": "C_transformer_torch",
+      "accuracy": 0.7518427518427518,
+      "params": 54400,
+      "kib_fp32": 212.5,
+      "kib_int8_est": 53.125,
+      "ms_per_phrase": 4.683937549998518,
+      "notes": "log-mel stem \u2192 T=32\u00d7D=32\u00d7L=6 \u2192 intent (Torch float GEMM)"
+    },
+    {
+      "name": "C_npukit_cpu_i8",
+      "accuracy": 0.7578125,
+      "params": 54400,
+      "kib_fp32": 212.5,
+      "kib_int8_est": 53.125,
+      "ms_per_phrase": 15.08354164998309,
+      "notes": "same weights; int8 tiled GEMM via npukit_transformer (n=128)"
+    },
+    {
+      "name": "C_npukit_fpga_i8",
+      "accuracy": 0.0,
+      "params": 54400,
+      "kib_fp32": 212.5,
+      "kib_int8_est": 53.125,
+      "ms_per_phrase": -1.0,
+      "notes": "no bitstream / device"
+    }
+  ],
+  "bit": null
+}

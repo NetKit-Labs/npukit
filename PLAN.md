@@ -18,9 +18,13 @@ The **GEMM hardware MVP is complete**. Transformer **glue** (from VERSION `0x300
 
 **Edge peers (not param-matched):** (1) **MCU-class DS-CNN** — TinyML DW/PW CNN, host int8 ~**98.4%** / ~8 KiB (`host/train_dscnn_mnist.py`); (2) **MCU/MPU + accelerator tiny-ViT** — on NpuKit, deploy-quant ~**98.0%** / ~13 KiB. Compare accuracy + footprint + where compute runs.
 
-**Optional later:** close WMEM 100 MHz timing (smoke WNS ≈ −1.57 ns), per-head scales (MHA), larger PE grid / model, depthwise / CNN on FPGA.
+**Command-phrase track (host done):** Speech Commands vocab + robot intents, T=32×D=32×L=6 causal LM + 30-way command head — intent **100%** numpy deploy; see [`docs/command_lm.md`](docs/command_lm.md).
 
-Docs: status [`docs/STATUS.md`](docs/STATUS.md), WMEM/WS [`docs/weight_stationary.md`](docs/weight_stationary.md), FPGA vs CPU [`docs/transformer_split.md`](docs/transformer_split.md), glue contract [`docs/transformer_glue.md`](docs/transformer_glue.md), bring-up [`docs/glue_bringup.md`](docs/glue_bringup.md), tiling [`docs/tiling.md`](docs/tiling.md).
+**Speech peers (host done):** same log-mel audio; short/long/fair races — fair order-only: hybrid transformer **96.5%** vs causal DS-CNN **27.8%**; see [`docs/speech_peers.md`](docs/speech_peers.md).
+
+**Optional later:** board bring-up for command-LM / fair HT packs, close WMEM 100 MHz timing, per-head scales (MHA), fuse KWS audio into the text LM body, larger PE grid / model.
+
+Docs: status [`docs/STATUS.md`](docs/STATUS.md), speech peers [`docs/speech_peers.md`](docs/speech_peers.md), command LM [`docs/command_lm.md`](docs/command_lm.md), WMEM/WS [`docs/weight_stationary.md`](docs/weight_stationary.md), FPGA vs CPU [`docs/transformer_split.md`](docs/transformer_split.md), glue [`docs/transformer_glue.md`](docs/transformer_glue.md), bring-up [`docs/glue_bringup.md`](docs/glue_bringup.md), tiling [`docs/tiling.md`](docs/tiling.md).
 
 ## Project layout
 
@@ -82,6 +86,8 @@ An int8 8×8 GEMM covers MLP/FC and 1×1 conv; standard conv can be lowered to G
 - Synthetic 1-layer e2e T=8×D=8: **done** (**ALL E2E PASS** in `host/npukit_transformer_e2e.ipynb`).
 - MNIST tiny-ViT T=16×D=16×MLP32×L=4 + per-channel scales + deploy-faithful QAT: **done** (numpy/full test **~98.0%**; board **ALL VIT PASS**; see [`docs/STATUS.md`](docs/STATUS.md)).
 - Host DS-CNN MNIST reference: **done** (float **98.00%** / int8 **98.39%** / 10k; not FPGA; see [`docs/STATUS.md`](docs/STATUS.md)).
+- Command-phrase tiny LM (text): **done** on host (intent **100%**; C++ pack; board optional).
+- Speech peers (audio log-mel short/long/fair): **done** on host; fair C win documented in [`docs/speech_peers.md`](docs/speech_peers.md).
 - Rebuild with `../scripts/build_bitstream.sh npukit` (or in-repo `scripts/`) after RTL/BD changes.
 
 ### Z7020 size note

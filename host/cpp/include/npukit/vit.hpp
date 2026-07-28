@@ -40,6 +40,16 @@ VitWeights load_vit_bin(const std::string& path);
 
 enum class GlueMode { Float, Hybrid };
 
+// Shared transformer block (causal=true for command LM).
+void block_forward(Device* dev, const VitBlockWeights& blk, int t, int d, int mlp,
+                   GlueMode glue, const int32_t* x_in, int32_t* x_out, bool causal = false);
+
+void matmul_q12(Device* dev, const int32_t* a_q12, int m, int k, const int8_t* w_i8, int n,
+                float scale_act, const double* inv_sw, int32_t* out_q12);
+
+void residual_rows(Device* dev, GlueMode glue, const int32_t* x, const int32_t* y, int rows, int n,
+                   int32_t* out);
+
 // End-to-end: 28x28 float image → logits Q12 [n_class].
 // If dev == nullptr, uses CPU int8 GEMM (host bring-up / parity checks).
 void vit_forward(Device* dev, const VitWeights& w, const float* img28,

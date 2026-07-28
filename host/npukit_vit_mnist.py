@@ -283,16 +283,28 @@ def synthetic_digit(rng: np.random.Generator, label: int, size: int = 28) -> np.
 def load_or_synth_batch(
     n: int = 4,
     seed: int = 0,
+    *,
+    sample_path: str | Path | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return images [N,28,28] float and labels [N]. Prefers real MNIST if present."""
+    """Return images [N,28,28] float and labels [N]. Prefers saved sample npz."""
     rng = np.random.default_rng(seed)
     labels = rng.integers(0, N_CLASS, size=n)
-    candidates = [
-        DEFAULT_SAMPLE,
-        Path("mnist_sample.npz"),
-        Path("/home/xilinx/jupyter_notebooks/mnist_sample.npz"),
-    ]
+    candidates: list[Path] = []
+    if sample_path is not None:
+        candidates.append(Path(sample_path))
+    candidates.extend(
+        [
+            DEFAULT_SAMPLE,
+            Path("mnist_sample.npz"),
+            Path("/home/xilinx/jupyter_notebooks/mnist_sample.npz"),
+        ]
+    )
+    seen: set[str] = set()
     for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
         try:
             data = np.load(path)
             imgs = data["images"].astype(np.float64)
@@ -304,7 +316,7 @@ def load_or_synth_batch(
                 imgs, labs = imgs[idx], labs[idx]
             else:
                 imgs, labs = imgs[:n], labs[:n]
-            print(f"loaded MNIST sample from {path} (n={len(labs)})")
+            print(f"loaded sample from {path} (n={len(labs)})")
             return imgs, labs
         except (FileNotFoundError, OSError, KeyError):
             pass
@@ -312,7 +324,7 @@ def load_or_synth_batch(
     imgs = np.stack([synthetic_digit(rng, int(lbl)) for lbl in labels], axis=0)
     print(
         f"using synthetic digits (n={n}); "
-        "run host/train_vit_mnist.py to create mnist_sample.npz"
+        "run host/train_vit_mnist.py to create a sample npz"
     )
     return imgs, labels
 
@@ -465,6 +477,7 @@ def run_vit_smoke(
     n: int = 2,
     verbose: bool = False,
     weights_path: str | Path | None | bool = None,
+    sample_path: str | Path | None = None,
 ) -> int:
     rng = np.random.default_rng(seed)
     # weights_path=False → force random; None → auto-load default npz if present
@@ -481,7 +494,7 @@ def run_vit_smoke(
         else:
             w = VitMnistWeights.make(rng)
             wsrc = "random-seeded"
-    imgs, labels = load_or_synth_batch(n=n, seed=seed + 1)
+    imgs, labels = load_or_synth_batch(n=n, seed=seed + 1, sample_path=sample_path)
 
     print("=== MNIST tiny-ViT smoke ===")
     print(
@@ -610,7 +623,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--weights",
         default=None,
-        help="path to vit_mnist_weights.npz (default: auto if present)",
+        help="path to vit_*_weights.npz (default: auto if present)",
+    )
+    p.add_argument(
+        "--sample",
+        default=None,
+        help="path to mnist_sample.npz",
     )
     p.add_argument("--random-weights", action="store_true", help="ignore saved weights")
     args = p.parse_args(list(sys.argv[1:] if argv is None else argv))
@@ -624,6 +642,7 @@ def main(argv: list[str] | None = None) -> int:
             n=args.n,
             verbose=args.verbose,
             weights_path=weights,
+            sample_path=args.sample,
         )
     return run_vit_smoke(
         bit_path=args.bit,
@@ -631,6 +650,7 @@ def main(argv: list[str] | None = None) -> int:
         n=args.n,
         verbose=args.verbose,
         weights_path=weights,
+        sample_path=args.sample,
     )
 
 

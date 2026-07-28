@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Train host-only DS-CNN on MNIST (benchmark reference vs tiny-ViT).
+"""Train host-only DS-CNN on MNIST (benchmark vs tiny-ViT).
 
 Not FPGA-mapped. Saves:
-  host/dscnn_mnist_weights.pt          (float)
-  host/dscnn_mnist_int8.npz            (BN-fold + per-tensor int8 + scales)
+  host/dscnn_mnist_weights.pt
+  host/dscnn_mnist_int8.npz
   host/dscnn_mnist_metrics.json
 
 Pipeline: float train → BN-fold → calibrate → STE QAT → export int8.
@@ -26,6 +26,9 @@ import dscnn_mnist as dscnn
 from train_vit_mnist import augment_batch, load_mnist
 
 HOST_DIR = Path(__file__).resolve().parent
+WEIGHTS_PATH = HOST_DIR / "dscnn_mnist_weights.pt"
+INT8_PATH = HOST_DIR / "dscnn_mnist_int8.npz"
+METRICS_PATH = HOST_DIR / "dscnn_mnist_metrics.json"
 
 
 def train(
@@ -39,6 +42,10 @@ def train(
 ) -> dscnn.DscnnMetrics:
     torch.manual_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dscnn.WEIGHTS_PATH = WEIGHTS_PATH
+    dscnn.INT8_PATH = INT8_PATH
+    dscnn.METRICS_PATH = METRICS_PATH
+
     x_tr, y_tr, x_te, y_te = load_mnist()
     tr = TensorDataset(torch.from_numpy(x_tr), torch.from_numpy(y_tr))
     te = TensorDataset(torch.from_numpy(x_te), torch.from_numpy(y_te))
@@ -47,7 +54,10 @@ def train(
 
     model = dscnn.DSCNN().to(device)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
-    print(f"DS-CNN train device={device} params={dscnn.count_params(model)} epochs={epochs}")
+    print(
+        f"DS-CNN train dataset=mnist device={device} "
+        f"params={dscnn.count_params(model)} epochs={epochs}"
+    )
 
     for ep in range(1, epochs + 1):
         model.train()
@@ -67,8 +77,8 @@ def train(
         print(f"epoch {ep}/{epochs}  loss={total_loss / max(n, 1):.4f}  test_acc={100 * acc:.2f}%")
 
     acc_f = dscnn.evaluate(model, te_loader, device)
-    torch.save(model.state_dict(), dscnn.WEIGHTS_PATH)
-    print(f"saved {dscnn.WEIGHTS_PATH}")
+    torch.save(model.state_dict(), WEIGHTS_PATH)
+    print(f"saved {WEIGHTS_PATH}")
     print(f"FINAL float test accuracy: {100 * acc_f:.2f}%")
 
     print("--- host int8 (BN-fold + calibrate + STE QAT) ---")
@@ -80,7 +90,7 @@ def train(
         qat_epochs=qat_epochs,
         qat_lr=qat_lr,
     )
-    print(f"FINAL int8 test accuracy: {100 * acc_i:.2f}%  ({dscnn.compare_vit_line()})")
+    print(f"FINAL int8 test accuracy: {100 * acc_i:.2f}%")
 
     m = dscnn.DscnnMetrics(
         test_acc_float=float(acc_f),
@@ -90,12 +100,12 @@ def train(
         epochs=epochs,
         qat_epochs=qat_epochs,
         notes=(
-            "host float + int8 DS-CNN (BN-fold, per-tensor fake-int8, STE QAT); "
-            "not FPGA-mapped; fair peer vs ViT deploy-quant ~94.28%"
+            "host float + int8 DS-CNN on mnist (BN-fold, per-tensor fake-int8, STE QAT); "
+            "not FPGA-mapped; peer vs tiny-ViT deploy-quant"
         ),
     )
-    dscnn.save_metrics(m)
-    print(f"saved {dscnn.METRICS_PATH}")
+    dscnn.save_metrics(m, METRICS_PATH)
+    print(f"saved {METRICS_PATH}")
     return m
 
 

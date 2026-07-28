@@ -42,14 +42,17 @@ HOST_DIR = Path(__file__).resolve().parent
 DATA_DIR = HOST_DIR / "data" / "mnist"
 WEIGHTS_PATH = HOST_DIR / "vit_mnist_weights.npz"
 SAMPLE_PATH = HOST_DIR / "mnist_sample.npz"
+STEM_TFLITE_PATH = HOST_DIR / "vit_mnist_stem.tflite"
 
 MNIST_BASE = "https://storage.googleapis.com/cvdf-datasets/mnist"
-MNIST_FILES = (
+IDX_FILES = (
     "train-images-idx3-ubyte.gz",
     "train-labels-idx1-ubyte.gz",
     "t10k-images-idx3-ubyte.gz",
     "t10k-labels-idx1-ubyte.gz",
 )
+# Backward-compatible alias
+MNIST_FILES = IDX_FILES
 
 
 class FakeQuantSTE(torch.autograd.Function):
@@ -97,15 +100,19 @@ def _per_channel_scale_conv(w: torch.Tensor, *, lo: float = 8.0, hi: float = 512
     return (127.0 / amax * 0.95).clamp(lo, hi)
 
 
-def _download_mnist() -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    for name in MNIST_FILES:
-        dest = DATA_DIR / name
+def _download_idx(data_dir: Path, base_url: str) -> None:
+    data_dir.mkdir(parents=True, exist_ok=True)
+    for name in IDX_FILES:
+        dest = data_dir / name
         if dest.exists() and dest.stat().st_size > 0:
             continue
-        url = f"{MNIST_BASE}/{name}"
+        url = f"{base_url}/{name}"
         print(f"download {url}")
         urllib.request.urlretrieve(url, dest)
+
+
+def _download_mnist() -> None:
+    _download_idx(DATA_DIR, MNIST_BASE)
 
 
 def _read_idx_images(path: Path) -> np.ndarray:
@@ -113,6 +120,8 @@ def _read_idx_images(path: Path) -> np.ndarray:
         magic, n, rows, cols = struct.unpack(">IIII", f.read(16))
         if magic != 2051:
             raise ValueError(f"bad image magic {magic}")
+        if (rows, cols) != (28, 28):
+            raise ValueError(f"expected 28x28 images, got {rows}x{cols} in {path}")
         data = np.frombuffer(f.read(), dtype=np.uint8)
         return data.reshape(n, rows, cols)
 
@@ -126,12 +135,21 @@ def _read_idx_labels(path: Path) -> np.ndarray:
 
 
 def load_mnist() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    _download_mnist()
+    """Load MNIST (native 28×28 grayscale, 10 classes)."""
+    _download_idx(DATA_DIR, MNIST_BASE)
     x_tr = _read_idx_images(DATA_DIR / "train-images-idx3-ubyte.gz").astype(np.float32) / 255.0
     y_tr = _read_idx_labels(DATA_DIR / "train-labels-idx1-ubyte.gz").astype(np.int64)
     x_te = _read_idx_images(DATA_DIR / "t10k-images-idx3-ubyte.gz").astype(np.float32) / 255.0
     y_te = _read_idx_labels(DATA_DIR / "t10k-labels-idx1-ubyte.gz").astype(np.int64)
+    print(f"loaded mnist: train={len(y_tr)} test={len(y_te)} shape={x_tr.shape[1:]} (28x28)")
     return x_tr, y_tr, x_te, y_te
+
+
+# Backward-compatible alias used by train_dscnn_mnist
+def load_dataset(name: str = "mnist") -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if name.lower().strip() != "mnist":
+        raise ValueError(f"unknown dataset {name!r}; only 'mnist' is supported")
+    return load_mnist()
 
 
 def augment_batch(
@@ -776,7 +794,12 @@ def load_weights_into_model(model: TinyViT, path: Path, device: torch.device) ->
     )
 
 
-def export_weights(model: TinyViT) -> None:
+def export_weights(
+    model: TinyViT,
+    *,
+    weights_path: Path | None = None,
+    stem_tflite_path: Path | None = None,
+) -> None:
     sw_cls = model.sw_cls.detach().cpu().numpy().astype(np.float64)
     payload: dict[str, np.ndarray] = {
         "w_pe": _quant_weight(model.w_pe, model.scale_embed.w),
@@ -820,9 +843,10 @@ def export_weights(model: TinyViT) -> None:
             payload[f"scale_block{i}_{name}_w"] = (
                 getattr(blk, f"sw_{name}").detach().cpu().numpy().astype(np.float64)
             )
-    np.savez_compressed(WEIGHTS_PATH, **payload)
+    out = Path(weights_path) if weights_path is not None else WEIGHTS_PATH
+    np.savez_compressed(out, **payload)
     print(
-        f"wrote {WEIGHTS_PATH}  stem=1 layers={len(model.blocks)} mlp={vit.VIT_MLP}  "
+        f"wrote {out}  stem=1 layers={len(model.blocks)} mlp={vit.VIT_MLP}  "
         + " ".join(
             f"L{i}={s.act:.1f}/{float(np.asarray(s.w).mean()):.1f}/{s.p:.1f}"
             for i, s in enumerate(model.scale_blocks)
@@ -833,16 +857,27 @@ def export_weights(model: TinyViT) -> None:
     try:
         from export_tflite_cnn import export_stem_tflite
 
-        export_stem_tflite(model)
+        export_stem_tflite(
+            model,
+            out_path=stem_tflite_path if stem_tflite_path is not None else STEM_TFLITE_PATH,
+        )
     except Exception as exc:
         print(f"warn: stem TFLite export skipped ({exc})")
 
 
-def save_sample(x_te: np.ndarray, y_te: np.ndarray, n: int = 64, seed: int = 0) -> None:
+def save_sample(
+    x_te: np.ndarray,
+    y_te: np.ndarray,
+    n: int = 64,
+    seed: int = 0,
+    *,
+    sample_path: Path | None = None,
+) -> None:
     rng = np.random.default_rng(seed)
     idx = rng.choice(len(y_te), size=min(n, len(y_te)), replace=False)
-    np.savez_compressed(SAMPLE_PATH, images=x_te[idx], labels=y_te[idx])
-    print(f"wrote {SAMPLE_PATH} n={len(idx)}")
+    out = Path(sample_path) if sample_path is not None else SAMPLE_PATH
+    np.savez_compressed(out, images=x_te[idx], labels=y_te[idx])
+    print(f"wrote {out} n={len(idx)}")
 
 
 @torch.no_grad()
@@ -871,9 +906,10 @@ def quant_numpy_accuracy(
     n_eval: int,
     *,
     log_every: int = 1000,
+    weights_path: Path | None = None,
 ) -> float:
     """Board-ref path accuracy on first n_eval test images (n_eval<=0 → all)."""
-    w = vit.VitMnistWeights.load(WEIGHTS_PATH)
+    w = vit.VitMnistWeights.load(weights_path if weights_path is not None else WEIGHTS_PATH)
     n_eval = len(y_te) if n_eval <= 0 else min(n_eval, len(y_te))
     correct = 0
     for i in range(n_eval):
@@ -891,8 +927,13 @@ def quant_numpy_accuracy(
 
 def train(args: argparse.Namespace) -> int:
     device = torch.device(args.device)
+    weights_path = Path(args.weights_out) if args.weights_out else WEIGHTS_PATH
+    sample_path = Path(args.sample_out) if args.sample_out else SAMPLE_PATH
+    stem_tflite_path = (
+        Path(args.stem_tflite_out) if args.stem_tflite_out else STEM_TFLITE_PATH
+    )
     x_tr, y_tr, x_te, y_te = load_mnist()
-    save_sample(x_te, y_te, n=args.sample_n, seed=args.seed)
+    save_sample(x_te, y_te, n=args.sample_n, seed=args.seed, sample_path=sample_path)
 
     if args.subset > 0:
         rng = np.random.default_rng(args.seed)
@@ -972,11 +1013,11 @@ def train(args: argparse.Namespace) -> int:
     n_stem = sum(p.numel() for p in model.stem.parameters())
     n_body = sum(p.numel() for p in model.parameters()) - n_stem
     print(
-        f"train tiny-ViT+DS-stem T={vit.VIT_T} D={vit.VIT_D} mlp={vit.VIT_MLP} "
+        f"train tiny-ViT+DS-stem dataset={ds} T={vit.VIT_T} D={vit.VIT_D} mlp={vit.VIT_MLP} "
         f"L={n_layers} glue={vit.DEFAULT_GLUE_MODE} "
         f"stem_params={n_stem} body_params={n_body} total={n_stem + n_body} "
         f"float={args.epochs} qat={args.qat_epochs} deploy_ft={args.deploy_epochs} "
-        f"init={args.init_weights or '-'} "
+        f"init={args.init_weights or '-'} out={weights_path.name} "
         f"train_n={len(y_tr)} aug={args.augment}/shift{args.aug_shift}/"
         f"noise{args.aug_noise}/erase{args.aug_erase_prob} device={device}"
     )
@@ -1000,10 +1041,10 @@ def train(args: argparse.Namespace) -> int:
             recal_every=args.qat_recal_every,
         )
     # Snapshot after QAT (stem now fake-int8 in proxy — deploy should already be close).
-    export_weights(model)
+    export_weights(model, weights_path=weights_path, stem_tflite_path=stem_tflite_path)
     probe_n = min(2000, len(y_te)) if args.eval_n <= 0 else min(args.eval_n, len(y_te))
     print(f"post-QAT numpy deploy probe on {probe_n} images...")
-    qacc_probe = quant_numpy_accuracy(x_te, y_te, probe_n)
+    qacc_probe = quant_numpy_accuracy(x_te, y_te, probe_n, weights_path=weights_path)
     qat_proxy = accuracy(model, te_loader, device, qat=True)
     print(
         f"post-QAT proxy={100 * qat_proxy:.2f}%  numpy_deploy={100 * qacc_probe:.2f}%  "
@@ -1035,10 +1076,12 @@ def train(args: argparse.Namespace) -> int:
             eval_deploy=False,
             label_smoothing=0.0,
         )
-        export_weights(model)
+        export_weights(model, weights_path=weights_path, stem_tflite_path=stem_tflite_path)
     n_eval = len(y_te) if args.eval_n <= 0 else min(args.eval_n, len(y_te))
     print(f"numpy quantized eval on {n_eval} test images (board-ref path)...")
-    qacc = quant_numpy_accuracy(x_te, y_te, n_eval if args.eval_n > 0 else 0)
+    qacc = quant_numpy_accuracy(
+        x_te, y_te, n_eval if args.eval_n > 0 else 0, weights_path=weights_path
+    )
     facc = accuracy(model, te_loader, device, qat=False)
     qat_acc = accuracy(model, te_loader, device, qat=True)
     print(f"float test accuracy (full):     {100 * facc:.2f}%")
@@ -1049,6 +1092,9 @@ def train(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Train MNIST tiny-ViT for NpuKit (QAT)")
+    p.add_argument("--weights-out", default="", help="override export npz path")
+    p.add_argument("--sample-out", default="", help="override board sample npz path")
+    p.add_argument("--stem-tflite-out", default="", help="override stem .tflite path")
     p.add_argument(
         "--layers",
         type=int,

@@ -1,0 +1,17 @@
+{
+  "bench": {
+    "note": "DMA pool + spin wait + fast numpy stem; MNIST; A9",
+    "bench_n": 64,
+    "stem_only_ms_per_img": 26.96,
+    "dscnn_int8_cpu_ms_per_image_single": 218.73,
+    "dscnn_int8_cpu_ms_per_image_over_batch": 203.12,
+    "vit_deploy_numpy_cpu_ms_per_image": 194.46,
+    "vit_fpga_ms_per_image_single": 613.52,
+    "vit_fpga_ms_per_image_over_batch": 614.58,
+    "history_vit_fpga_ms": {
+      "pre_pool": 976.55,
+      "dma_pool": 651.83,
+      "pool_plus_fast_stem": 613.52
+    }
+  }
+}

@@ -82,37 +82,51 @@ class MmioTransport:
 
 
 class DmaTransport:
-    """AXI DMA simple-mode transport; one S_AXIS packet per A/B tile pair."""
+    """AXI DMA transport with pooled CMA buffers (no per-tile allocate/free).
+
+    Reusing one MM2S and one S2MM buffer removes most Python/PYNQ chatter that
+    dominated ViT end-to-end latency (~ms per tile from allocate alone).
+    """
 
     def __init__(self, dma: object, mmio: MMIO) -> None:
         self.dma = dma
         self.mmio = mmio
+        self._tx = allocate(shape=(2 * N * N // 4,), dtype=np.uint32)
+        self._rx = allocate(shape=(N * N,), dtype=np.uint32)
 
     def load(self, a: np.ndarray, b: np.ndarray) -> None:
-        packet = allocate(shape=(2 * N * N // 4,), dtype=np.uint32)
-        packet[: N * N // 4] = pack_i8(a)
-        packet[N * N // 4 :] = pack_i8(b)
-        packet.flush()
-        self.dma.sendchannel.transfer(packet)
+        self._tx[: N * N // 4] = pack_i8(a)
+        self._tx[N * N // 4 :] = pack_i8(b)
+        self._tx.flush()
+        self.dma.sendchannel.transfer(self._tx)
         self.dma.sendchannel.wait()
-        del packet
 
     def read(self) -> np.ndarray:
-        packet = allocate(shape=(N * N,), dtype=np.uint32)
-        self.dma.recvchannel.transfer(packet)
+        self.dma.recvchannel.transfer(self._rx)
         self.mmio.write(REG_CTRL, CTRL_TX_ARM)
         self.dma.recvchannel.wait()
-        packet.invalidate()
-        result = unpack_i32(packet)
-        del packet
-        return result
+        self._rx.invalidate()
+        return unpack_i32(self._rx)
+
+    def close(self) -> None:
+        for buf in (getattr(self, "_tx", None), getattr(self, "_rx", None)):
+            if buf is not None:
+                try:
+                    buf.freebuffer()
+                except Exception:
+                    pass
+        self._tx = None  # type: ignore[assignment]
+        self._rx = None  # type: ignore[assignment]
 
 
 def wait_done(mmio: MMIO) -> None:
-    for _ in range(100_000):
+    """Spin-wait for gemm_done; avoid sleep() on the hot path."""
+    for i in range(2_000_000):
         if mmio.read(REG_STATUS) & 0x2:
             return
-        time.sleep(0.000_05)
+        # Yield only after a long spin so tiny tiles are not paced by 50µs sleeps.
+        if (i & 0x3FFF) == 0x3FFF:
+            time.sleep(0)
     raise TimeoutError(f"NPU timeout status=0x{mmio.read(REG_STATUS):X}")
 
 
