@@ -4,13 +4,14 @@ Checkpoint after board re-smoke of deploy-track ViT (richer DS-stem, L=4, MLP=32
 
 ## Where we are
 
-**Hardware MVP is complete.** The Zynq-7020 bitstream (`VERSION 0x300`) provides:
+**Hardware MVP is complete.** The Zynq-7020 bitstream (`VERSION 0x301`) provides:
 
 | Block | Role |
 |-------|------|
 | 8×8 int8 systolic GEMM | Output-stationary; tiled MxKxN via host DMA/MMIO |
+| Weight-stationary + A ping-pong | `LOAD_CFG` A/B-only AXIS; dual-A shadow fill while busy (`FEAT_WS\|PP`) |
 | Transformer glue | Residual / GELU / RMSNorm / Softmax, `MAX_LEN=16`, 100 MHz (optional path) |
-| Host (A9) | Orchestration, per-channel quant/scales, DS-stem, float Softmax/RMSNorm/GELU |
+| Host (A9) | C++ driver (XRT CMA), per-channel quant, DS-stem, float Softmax/RMSNorm/GELU |
 
 Fabric clock: **PS FCLK0 @ 100 MHz**. Latest rebuild closed timing (**WNS ≈ +0.83 ns** post-route).
 
@@ -81,13 +82,23 @@ Animated summary: [`viz/out/edge_peers.gif`](../viz/out/edge_peers.gif). Five-mi
 - Full board smoke with new weights: **ALL SMOKE PASS**, ViT ref↔hw **100%** agree
 - Host DS-CNN peer, Netron graphs, edge-peers GIF, 5-min bring-up script
 
+## C++ e2e (A9)
+
+| Path | ~ms/img |
+|------|--------:|
+| Python ViT FPGA (pool + fast stem) | ~614 |
+| C++ ViT FPGA GEMM (XRT CMA, pre-WS) | ~9.4 |
+| C++ DS-CNN int8 peer | ~9.3 |
+| C++ ViT CPU GEMM | ~6.6 |
+
+See `host/cpp/README.md`. WS+PP targets the FPGA path vs A9 CPU GEMM.
+
 ## Still optionally valuable
 
-1. Close the last **~1 pp** vs DS-CNN (slightly richer stem / longer float — not required for the story)
-2. Optional `d_ff=4×` experiment (larger KiB; uncertain gain)
-3. Depthwise / CNN path in RTL — only if profiling shows stem/DW dominate wall-clock
-4. PE-grid growth, ping-pong, HW glue for ViT deploy — deferred (float-on-A9 is winning for accuracy)
-5. Multi-head attention + per-head scales
+1. Layer-level weight BRAM (hold full `W`, stream only activations)
+2. Close the last **~1 pp** vs DS-CNN
+3. PE-grid growth / larger demo model once host traffic is no longer the limit
+4. Multi-head attention + per-head scales
 
 ## Geometry notes
 

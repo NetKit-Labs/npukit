@@ -28,6 +28,16 @@ viz/__pycache__/
 # MNIST download cache (weights/samples under host/ are tracked)
 host/data/
 
+# C++ driver build artifacts / packed weight blob
+host/cpp/*.o
+host/cpp/src/*.o
+host/cpp/npukit_bench
+host/cpp/npukit_vit
+host/cpp/npukit_dscnn
+host/cpp/vit_mnist.bin
+host/cpp/dscnn_mnist.bin
+
+
 # Editor / OS
 .DS_Store
 *~

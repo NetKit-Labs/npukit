@@ -1,18 +1,20 @@
 // AXI4-Lite control + BRAM A/B/C + AXIS DMA ports + skewed feed sequencer.
 // Register map (byte offsets):
 //   0x000 ID        R  0x4E50554B ("NPUK")
-//   0x004 VERSION   R  0x00000300  (v3: transformer glue)
+//   0x004 VERSION   R  0x00000301  (v3.1: weight-stationary + A ping-pong)
 //   0x008 STATUS    R  [0] busy (GEMM|glue)
 //                      [1] gemm_done  [2] axis_rx_done  [3] axis_tx_done
-//                      [4] glue_done
+//                      [4] glue_done  [5] shadow_a_ready
 //   0x00C CTRL      W  [0] start  [1] clear  [2] axis_tx_arm (GEMM pulses)
 //   0x010 N_PARAM   R  N
-//   0x014 FEATURES  R  [0] GEMM  [1] GLUE (residual/gelu/rmsnorm/softmax)
+//   0x014 FEATURES  R  [0] GEMM  [1] GLUE  [2] WS (A/B-only load)  [3] PP (dual-A)
 //   0x018 GLUE_CTRL W  [0] start pulse  [7:4] opcode (see npukit_glue.sv)
 //   0x01C GLUE_LEN  RW vector length 1..16
 //   0x020 GLUE_PARAM RW RMSNorm eps (Q12) etc.
 //   0x024 GLUE_COUNT R  increments each completed glue op (host sync)
-//   0x100..0x13F    A  R/W  (also fillable via S_AXIS: 16 words A then 16 words B)
+//   0x028 LOAD_CFG  RW [1:0] 0=A|B(32w)  1=A-only(16w)  2=B-only(16w)
+//                      writing LOAD_CFG resets AXIS RX index
+//   0x100..0x13F    A  R/W  (active write bank; also via S_AXIS)
 //   0x200..0x23F    B  R/W
 //   0x400..0x4FF    C  R    (also readable via M_AXIS after CTRL.axis_tx_arm)
 //   0x500..0x5FF    GLUE_X     R/W int32 Q12
@@ -20,7 +22,8 @@
 //   0x700..0x7FF    GLUE_OUT   R/W int32 (Q12, or Q16 after softmax)
 //   0x800..0x8FF    GLUE_GAMMA R/W int32 Q12
 //
-// Transformer glue lives in npukit_glue.sv (not in the PE array).
+// Weight-stationary: hold B across kicks; stream A-only (LOAD_CFG=1).
+// Ping-pong: dual A banks; AXIS may fill the shadow bank while GEMM runs.
 
 module npukit_axil #(
     parameter int N          = 8,
@@ -48,7 +51,7 @@ module npukit_axil #(
     output logic                  s_axi_rvalid,
     input  logic                  s_axi_rready,
 
-    // AXI-Stream slave (DMA MM2S → A then B, 32-bit words)
+    // AXI-Stream slave (DMA MM2S → tile payload per LOAD_CFG)
     input  logic [31:0]           s_axis_tdata,
     input  logic                  s_axis_tvalid,
     output logic                  s_axis_tready,
@@ -70,11 +73,15 @@ module npukit_axil #(
     localparam int B_WORDS  = NN / 4;
     localparam int C_WORDS  = NN;
     localparam logic [31:0] ID_VAL       = 32'h4E50554B;
-    localparam logic [31:0] VERSION_VAL  = 32'h00000300;
-    localparam logic [31:0] FEATURES_VAL = 32'h00000003; // bit0=GEMM bit1=GLUE
+    localparam logic [31:0] VERSION_VAL  = 32'h00000301;
+    // bit0=GEMM bit1=GLUE bit2=WS bit3=PP
+    localparam logic [31:0] FEATURES_VAL = 32'h0000000F;
     localparam int          GLUE_LEN_MAX = 16;
+    localparam logic [1:0]  LOAD_AB = 2'd0;
+    localparam logic [1:0]  LOAD_A  = 2'd1;
+    localparam logic [1:0]  LOAD_B  = 2'd2;
 
-    (* ram_style = "block" *) logic signed [7:0]  a_mem [0:NN-1];
+    (* ram_style = "block" *) logic signed [7:0]  a_mem [0:1][0:NN-1];
     (* ram_style = "block" *) logic signed [7:0]  b_mem [0:NN-1];
     (* ram_style = "block" *) logic signed [31:0] c_mem [0:NN-1];
 
@@ -100,7 +107,13 @@ module npukit_axil #(
     logic clear_req;
     logic tx_arm_req;
 
-    // Transformer glue (npukit_glue.sv) — residual / GELU / RMSNorm / Softmax
+    logic [1:0] load_mode_r;
+    logic       a_rd_bank;
+    logic       a_wr_bank;
+    logic       shadow_a_ready;
+    logic       load_cfg_we;
+
+    // Transformer glue (npukit_glue.sv)
     logic                       glue_start;
     logic [3:0]                 glue_opcode;
     logic [7:0]                 glue_len_r;
@@ -114,7 +127,6 @@ module npukit_axil #(
     logic signed [31:0]         glue_host_wdata;
     logic signed [31:0]         glue_host_rdata;
 
-    // Mux write vs AXI-Lite read address into the glue banks (combo read).
     logic [1:0]                      glue_host_bank;
     logic [$clog2(GLUE_LEN_MAX)-1:0] glue_host_idx;
     logic [1:0]                      glue_ar_bank;
@@ -151,7 +163,6 @@ module npukit_axil #(
         .host_rdata (glue_host_rdata)
     );
 
-    // Shared by AXI-Lite write handshake and the single A/B/C memory writer.
     logic        wr_en;
     logic [11:0] wr_addr;
     logic [31:0] wr_data;
@@ -176,10 +187,14 @@ module npukit_axil #(
     integer                        i;
 
     assign busy = busy_r | glue_busy;
-    assign done = done_r; // GEMM done; glue has STATUS[4]
+    assign done = done_r;
+
+    // Bank swap / wr-bank prep on START (handled in mem process with shadow_a_ready)
+    logic start_bank_go;
+    assign start_bank_go = (state == ST_IDLE) && start_req;
 
     // -------------------------------------------------------------------------
-    // Compute sequencer: CLEAR alone, START alone (accumulate), or both
+    // Compute sequencer
     // -------------------------------------------------------------------------
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -226,7 +241,6 @@ module npukit_axil #(
                     busy_r <= 1'b1;
                     clear  <= 1'b1;
                     t      <= '0;
-                    // If start was also requested in the same CTRL write, run next
                     if (start_req || do_run_latched)
                         state <= ST_RUN;
                     else begin
@@ -240,7 +254,7 @@ module npukit_axil #(
                     enable <= 1'b1;
                     for (i = 0; i < N; i++) begin
                         if ((t >= i[$bits(t)-1:0]) && ((t - i[$bits(t)-1:0]) < N[$bits(t)-1:0])) begin
-                            a_west[i]  <= a_mem[i*N + (t - i)];
+                            a_west[i]  <= a_mem[a_rd_bank][i*N + (t - i)];
                             b_north[i] <= b_mem[(t - i)*N + i];
                         end
                     end
@@ -272,7 +286,6 @@ module npukit_axil #(
         end
     end
 
-    // Latch "run after clear" when CTRL has both bits in one write
     logic do_run_latched;
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n)
@@ -284,28 +297,62 @@ module npukit_axil #(
     end
 
     // -------------------------------------------------------------------------
-    // AXIS RX: 16 words A + 16 words B
+    // AXIS RX: AB / A-only / B-only; A fills may land in shadow bank while busy
     // -------------------------------------------------------------------------
     logic [$clog2(A_WORDS+B_WORDS)-1:0] rx_idx;
     logic                               axis_rx_done;
+    logic [$clog2(A_WORDS+B_WORDS):0]   rx_target;
 
-    assign s_axis_tready = rst_n && !busy_r && !glue_busy && (state == ST_IDLE) &&
-                           (rx_idx < (A_WORDS + B_WORDS));
+    always_comb begin
+        unique case (load_mode_r)
+            LOAD_A:  rx_target = A_WORDS;
+            LOAD_B:  rx_target = B_WORDS;
+            default: rx_target = A_WORDS + B_WORDS;
+        endcase
+    end
 
-    // This is the only process that writes A/B/C memories.  It arbitrates
-    // completion capture, AXIS payloads, and AXI-Lite payloads by priority.
+    // Idle fill always OK; during GEMM only A-only into the non-active bank.
+    wire rx_idle_ok = !busy_r && !glue_busy && (state == ST_IDLE);
+    wire rx_shadow_ok = (load_mode_r == LOAD_A) && busy_r && !glue_busy &&
+                        (a_wr_bank != a_rd_bank) && !shadow_a_ready;
+    assign s_axis_tready = rst_n && (rx_idx < rx_target) && (rx_idle_ok || rx_shadow_ok);
+    // Idle A fills the active read bank; busy A-only prefetch uses the write/shadow bank.
+    wire a_fill_bank = rx_shadow_ok ? a_wr_bank : a_rd_bank;
+
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            rx_idx       <= '0;
-            axis_rx_done <= 1'b0;
+            rx_idx         <= '0;
+            axis_rx_done   <= 1'b0;
+            load_mode_r    <= LOAD_AB;
+            a_rd_bank      <= 1'b0;
+            a_wr_bank      <= 1'b0;
+            shadow_a_ready <= 1'b0;
             for (wi = 0; wi < NN; wi++) begin
-                a_mem[wi] <= '0;
-                b_mem[wi] <= '0;
-                c_mem[wi] <= '0;
+                a_mem[0][wi] <= '0;
+                a_mem[1][wi] <= '0;
+                b_mem[wi]    <= '0;
+                c_mem[wi]    <= '0;
             end
         end else begin
             if (clear_req)
                 axis_rx_done <= 1'b0;
+
+            // START: consume shadow A if present; always aim next fill at the other bank.
+            if (start_bank_go) begin
+                if (shadow_a_ready) begin
+                    a_rd_bank      <= a_wr_bank;
+                    a_wr_bank      <= ~a_wr_bank;
+                    shadow_a_ready <= 1'b0;
+                end else begin
+                    a_wr_bank <= ~a_rd_bank;
+                end
+            end
+
+            if (load_cfg_we) begin
+                load_mode_r  <= wr_data[1:0];
+                rx_idx       <= '0;
+                axis_rx_done <= 1'b0;
+            end
 
             if (capture_c) begin
                 for (wi = 0; wi < NN; wi++)
@@ -313,29 +360,43 @@ module npukit_axil #(
             end
 
             if (s_axis_tvalid && s_axis_tready) begin
-                if (rx_idx < A_WORDS) begin
-                    a_mem[rx_idx*4 + 0] <= s_axis_tdata[7:0];
-                    a_mem[rx_idx*4 + 1] <= s_axis_tdata[15:8];
-                    a_mem[rx_idx*4 + 2] <= s_axis_tdata[23:16];
-                    a_mem[rx_idx*4 + 3] <= s_axis_tdata[31:24];
+                if (load_mode_r == LOAD_B) begin
+                    b_mem[rx_idx*4 + 0] <= s_axis_tdata[7:0];
+                    b_mem[rx_idx*4 + 1] <= s_axis_tdata[15:8];
+                    b_mem[rx_idx*4 + 2] <= s_axis_tdata[23:16];
+                    b_mem[rx_idx*4 + 3] <= s_axis_tdata[31:24];
+                end else if (load_mode_r == LOAD_A) begin
+                    a_mem[a_fill_bank][rx_idx*4 + 0] <= s_axis_tdata[7:0];
+                    a_mem[a_fill_bank][rx_idx*4 + 1] <= s_axis_tdata[15:8];
+                    a_mem[a_fill_bank][rx_idx*4 + 2] <= s_axis_tdata[23:16];
+                    a_mem[a_fill_bank][rx_idx*4 + 3] <= s_axis_tdata[31:24];
+                end else if (rx_idx < A_WORDS) begin
+                    a_mem[a_fill_bank][rx_idx*4 + 0] <= s_axis_tdata[7:0];
+                    a_mem[a_fill_bank][rx_idx*4 + 1] <= s_axis_tdata[15:8];
+                    a_mem[a_fill_bank][rx_idx*4 + 2] <= s_axis_tdata[23:16];
+                    a_mem[a_fill_bank][rx_idx*4 + 3] <= s_axis_tdata[31:24];
                 end else begin
                     b_mem[(rx_idx-A_WORDS)*4 + 0] <= s_axis_tdata[7:0];
                     b_mem[(rx_idx-A_WORDS)*4 + 1] <= s_axis_tdata[15:8];
                     b_mem[(rx_idx-A_WORDS)*4 + 2] <= s_axis_tdata[23:16];
                     b_mem[(rx_idx-A_WORDS)*4 + 3] <= s_axis_tdata[31:24];
                 end
-                if (rx_idx == (A_WORDS+B_WORDS)-1) begin
+
+                if (rx_idx == rx_target - 1) begin
                     rx_idx       <= '0;
-                    axis_rx_done <= s_axis_tlast;
+                    axis_rx_done <= 1'b1;
+                    if (rx_shadow_ok)
+                        shadow_a_ready <= 1'b1;
                 end else
                     rx_idx <= rx_idx + 1'b1;
-            end else if (wr_en && !busy_r) begin
+            end else if (wr_en && !busy_r && !load_cfg_we) begin
                 if ((wr_addr >= 12'h100) && (wr_addr < 12'h140)) begin
                     base = (wr_addr - 12'h100) >> 2;
-                    if (wr_strb[0]) a_mem[base*4 + 0] <= wr_data[7:0];
-                    if (wr_strb[1]) a_mem[base*4 + 1] <= wr_data[15:8];
-                    if (wr_strb[2]) a_mem[base*4 + 2] <= wr_data[23:16];
-                    if (wr_strb[3]) a_mem[base*4 + 3] <= wr_data[31:24];
+                    // MMIO always updates the active read bank (idle path).
+                    if (wr_strb[0]) a_mem[a_rd_bank][base*4 + 0] <= wr_data[7:0];
+                    if (wr_strb[1]) a_mem[a_rd_bank][base*4 + 1] <= wr_data[15:8];
+                    if (wr_strb[2]) a_mem[a_rd_bank][base*4 + 2] <= wr_data[23:16];
+                    if (wr_strb[3]) a_mem[a_rd_bank][base*4 + 3] <= wr_data[31:24];
                 end else if ((wr_addr >= 12'h200) && (wr_addr < 12'h240)) begin
                     base = (wr_addr - 12'h200) >> 2;
                     if (wr_strb[0]) b_mem[base*4 + 0] <= wr_data[7:0];
@@ -407,9 +468,10 @@ module npukit_axil #(
             start_req      <= 1'b0;
             clear_req      <= 1'b0;
             tx_arm_req     <= 1'b0;
+            load_cfg_we    <= 1'b0;
             glue_start      <= 1'b0;
             glue_opcode     <= '0;
-            glue_len_r      <= 8'd64;
+            glue_len_r      <= 8'd16;
             glue_param_r    <= 32'sd1;
             glue_host_we    <= 1'b0;
             glue_wr_bank    <= '0;
@@ -420,6 +482,7 @@ module npukit_axil #(
             start_req    <= 1'b0;
             clear_req    <= 1'b0;
             tx_arm_req   <= 1'b0;
+            load_cfg_we  <= 1'b0;
             glue_start   <= 1'b0;
             glue_host_we <= 1'b0;
 
@@ -441,6 +504,8 @@ module npukit_axil #(
                         clear_req  <= wr_data[1];
                         tx_arm_req <= wr_data[2];
                     end
+                end else if (wr_addr == 12'h028) begin
+                    if (wr_strb[0]) load_cfg_we <= 1'b1;
                 end else if (wr_addr == 12'h018) begin
                     if (wr_strb[0] && !busy_r && !glue_busy) begin
                         glue_opcode <= wr_data[7:4];
@@ -483,8 +548,8 @@ module npukit_axil #(
                 else if (s_axi_araddr[11:0] == 12'h004)
                     s_axi_rdata <= VERSION_VAL;
                 else if (s_axi_araddr[11:0] == 12'h008)
-                    s_axi_rdata <= {27'h0, glue_done, axis_tx_done, axis_rx_done, done_r,
-                                    (busy_r | glue_busy)};
+                    s_axi_rdata <= {26'h0, shadow_a_ready, glue_done, axis_tx_done,
+                                    axis_rx_done, done_r, (busy_r | glue_busy)};
                 else if (s_axi_araddr[11:0] == 12'h010)
                     s_axi_rdata <= N;
                 else if (s_axi_araddr[11:0] == 12'h014)
@@ -495,12 +560,16 @@ module npukit_axil #(
                     s_axi_rdata <= glue_param_r;
                 else if (s_axi_araddr[11:0] == 12'h024)
                     s_axi_rdata <= glue_complete_count;
+                else if (s_axi_araddr[11:0] == 12'h028)
+                    s_axi_rdata <= {30'h0, load_mode_r};
                 else if ((s_axi_araddr[11:0] >= 12'h100) && (s_axi_araddr[11:0] < 12'h140)) begin
                     rbase = (s_axi_araddr[11:0] - 12'h100) >> 2;
-                    s_axi_rdata <= {a_mem[rbase*4+3], a_mem[rbase*4+2], a_mem[rbase*4+1], a_mem[rbase*4+0]};
+                    s_axi_rdata <= {a_mem[a_rd_bank][rbase*4+3], a_mem[a_rd_bank][rbase*4+2],
+                                    a_mem[a_rd_bank][rbase*4+1], a_mem[a_rd_bank][rbase*4+0]};
                 end else if ((s_axi_araddr[11:0] >= 12'h200) && (s_axi_araddr[11:0] < 12'h240)) begin
                     rbase = (s_axi_araddr[11:0] - 12'h200) >> 2;
-                    s_axi_rdata <= {b_mem[rbase*4+3], b_mem[rbase*4+2], b_mem[rbase*4+1], b_mem[rbase*4+0]};
+                    s_axi_rdata <= {b_mem[rbase*4+3], b_mem[rbase*4+2], b_mem[rbase*4+1],
+                                    b_mem[rbase*4+0]};
                 end else if ((s_axi_araddr[11:0] >= 12'h400) && (s_axi_araddr[11:0] < 12'h500)) begin
                     rbase = (s_axi_araddr[11:0] - 12'h400) >> 2;
                     s_axi_rdata <= c_mem[rbase];

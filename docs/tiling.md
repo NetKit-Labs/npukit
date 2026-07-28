@@ -32,6 +32,8 @@ $$
 
 On NpuKit, $M$, $K$, and $N$ must be multiples of the hardware tile size $T = 8$.
 
+With `VERSION ≥ 0x301`, the host can stream **B-only** then **A-only** tiles (weight-stationary kick) and prefetch the next A into a shadow bank while the array runs (ping-pong). See [`weight_stationary.md`](weight_stationary.md).
+
 ## Spatial tiles vs $K$ reduction
 
 Split the output into $T\times T$ blocks. For the block whose top-left is $(i_0, j_0)$:
