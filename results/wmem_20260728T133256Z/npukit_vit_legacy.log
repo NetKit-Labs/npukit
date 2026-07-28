@@ -1,0 +1,15 @@
+===== npukit_vit (WMEM=0) =====
+ViT e2e  T=16 D=16 MLP=32 L=4 mid=24  samples=8  glue=float
+  ID=0x4E50554B VERSION=0x00000302 FEATURES=0x0000001F DMA=xrt-cma WS=1 PP=1 WMEM=1
+  sample[0] label=4 pred=4 ref=4 max|dQ12|=0
+  sample[1] label=3 pred=3 ref=3 max|dQ12|=0
+  sample[2] label=1 pred=6 ref=6 max|dQ12|=0
+  sample[3] label=2 pred=2 ref=2 max|dQ12|=0
+  sample[4] label=3 pred=3 ref=3 max|dQ12|=0
+  sample[5] label=5 pred=5 ref=5 max|dQ12|=0
+  sample[6] label=0 pred=0 ref=0 max|dQ12|=0
+  sample[7] label=9 pred=1 ref=1 max|dQ12|=0
+  agree_argmax 8/8  label_ok 6/8  max|err|=0
+  e2e latency: 9.83 ms/img  (iters=16)
+DONE
+SMOKE_COMPLETE

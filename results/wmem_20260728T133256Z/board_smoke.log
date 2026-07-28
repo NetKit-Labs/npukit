@@ -1,0 +1,64 @@
+[sudo] password for xilinx: ID=0x4E50554B VERSION=0x00000302 FEATURES=0x0000001F
+BITSTREAM_OK
+rm -f src/*.o npukit_bench npukit_vit npukit_dscnn
+g++ -O2 -std=c++17 -Wall -Wextra -Iinclude -DNPUKIT_HAS_XRT -I/usr/include/xrt -DNPUKIT_HAS_XLNK -c -o src/device.o src/device.cpp
+g++ -O2 -std=c++17 -Wall -Wextra -Iinclude -DNPUKIT_HAS_XRT -I/usr/include/xrt -DNPUKIT_HAS_XLNK -c -o src/stem.o src/stem.cpp
+g++ -O2 -std=c++17 -Wall -Wextra -Iinclude -DNPUKIT_HAS_XRT -I/usr/include/xrt -DNPUKIT_HAS_XLNK -c -o src/vit.o src/vit.cpp
+g++ -O2 -std=c++17 -Wall -Wextra -Iinclude -DNPUKIT_HAS_XRT -I/usr/include/xrt -DNPUKIT_HAS_XLNK -c -o src/bench_main.o src/bench_main.cpp
+g++ -O2 -std=c++17 -Wall -Wextra -Iinclude -DNPUKIT_HAS_XRT -I/usr/include/xrt -DNPUKIT_HAS_XLNK -c -o src/vit_main.o src/vit_main.cpp
+g++ -O2 -std=c++17 -Wall -Wextra -Iinclude -DNPUKIT_HAS_XRT -I/usr/include/xrt -DNPUKIT_HAS_XLNK -c -o src/dscnn.o src/dscnn.cpp
+g++ -O2 -std=c++17 -Wall -Wextra -Iinclude -DNPUKIT_HAS_XRT -I/usr/include/xrt -DNPUKIT_HAS_XLNK -c -o src/dscnn_main.o src/dscnn_main.cpp
+g++ -O2 -std=c++17 -Wall -Wextra -Iinclude -DNPUKIT_HAS_XRT -I/usr/include/xrt -DNPUKIT_HAS_XLNK -o npukit_bench src/device.o src/stem.o src/vit.o src/bench_main.o -lm -lxrt_coreutil -lxrt_core -lcma
+g++ -O2 -std=c++17 -Wall -Wextra -Iinclude -DNPUKIT_HAS_XRT -I/usr/include/xrt -DNPUKIT_HAS_XLNK -o npukit_vit src/device.o src/stem.o src/vit.o src/vit_main.o -lm -lxrt_coreutil -lxrt_core -lcma
+g++ -O2 -std=c++17 -Wall -Wextra -Iinclude -DNPUKIT_HAS_XRT -I/usr/include/xrt -DNPUKIT_HAS_XLNK -o npukit_dscnn src/dscnn.o src/dscnn_main.o -lm
+===== npukit_bench (WMEM default) =====
+NpuKit C++ driver
+  ID=0x4E50554B VERSION=0x00000302 FEATURES=0x0000001F DMA=xrt-cma WS=1 PP=1 WMEM=1
+  GEMM 8x8 A@I: PASS
+  matmul 16x16x16:        0.11 ms  (8 HW tiles)
+  320 x GEMM 8x8 kicks:    8.79 ms  (0.03 ms/kick)
+  implied ViT-body-like: ~9 ms/img (GEMM only, no stem/norms)
+  glue residual: PASS
+  hybrid glue: HW Softmax(len=16) + float GELU(len=32) OK
+  stem (C, synth w):      2.69 ms/img
+DONE
+===== npukit_bench (WMEM=0 legacy) =====
+NpuKit C++ driver
+  ID=0x4E50554B VERSION=0x00000302 FEATURES=0x0000001F DMA=xrt-cma WS=1 PP=1 WMEM=1
+  GEMM 8x8 A@I: PASS
+  matmul 16x16x16:        0.11 ms  (8 HW tiles)
+  320 x GEMM 8x8 kicks:    6.42 ms  (0.02 ms/kick)
+  implied ViT-body-like: ~6 ms/img (GEMM only, no stem/norms)
+  glue residual: PASS
+  hybrid glue: HW Softmax(len=16) + float GELU(len=32) OK
+  stem (C, synth w):      2.75 ms/img
+DONE
+===== npukit_vit (WMEM default) =====
+ViT e2e  T=16 D=16 MLP=32 L=4 mid=24  samples=8  glue=float
+  ID=0x4E50554B VERSION=0x00000302 FEATURES=0x0000001F DMA=xrt-cma WS=1 PP=1 WMEM=1
+  sample[0] label=4 pred=4 ref=4 max|dQ12|=0
+  sample[1] label=3 pred=3 ref=3 max|dQ12|=0
+  sample[2] label=1 pred=6 ref=6 max|dQ12|=0
+  sample[3] label=2 pred=2 ref=2 max|dQ12|=0
+  sample[4] label=3 pred=3 ref=3 max|dQ12|=0
+  sample[5] label=5 pred=5 ref=5 max|dQ12|=0
+  sample[6] label=0 pred=0 ref=0 max|dQ12|=0
+  sample[7] label=9 pred=1 ref=1 max|dQ12|=0
+  agree_argmax 8/8  label_ok 6/8  max|err|=0
+  e2e latency: 9.97 ms/img  (iters=16)
+DONE
+===== npukit_vit (WMEM=0) =====
+ViT e2e  T=16 D=16 MLP=32 L=4 mid=24  samples=8  glue=float
+  ID=0x4E50554B VERSION=0x00000302 FEATURES=0x0000001F DMA=xrt-cma WS=1 PP=1 WMEM=1
+  sample[0] label=4 pred=4 ref=4 max|dQ12|=0
+  sample[1] label=3 pred=3 ref=3 max|dQ12|=0
+  sample[2] label=1 pred=6 ref=6 max|dQ12|=0
+  sample[3] label=2 pred=2 ref=2 max|dQ12|=0
+  sample[4] label=3 pred=3 ref=3 max|dQ12|=0
+  sample[5] label=5 pred=5 ref=5 max|dQ12|=0
+  sample[6] label=0 pred=0 ref=0 max|dQ12|=0
+  sample[7] label=9 pred=1 ref=1 max|dQ12|=0
+  agree_argmax 8/8  label_ok 6/8  max|err|=0
+  e2e latency: 9.83 ms/img  (iters=16)
+DONE
+SMOKE_COMPLETE

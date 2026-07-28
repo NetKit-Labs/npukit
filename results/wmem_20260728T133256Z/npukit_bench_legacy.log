@@ -1,0 +1,10 @@
+NpuKit C++ driver
+  ID=0x4E50554B VERSION=0x00000302 FEATURES=0x0000001F DMA=xrt-cma WS=1 PP=1 WMEM=1
+  GEMM 8x8 A@I: PASS
+  matmul 16x16x16:        0.11 ms  (8 HW tiles)
+  320 x GEMM 8x8 kicks:    6.42 ms  (0.02 ms/kick)
+  implied ViT-body-like: ~6 ms/img (GEMM only, no stem/norms)
+  glue residual: PASS
+  hybrid glue: HW Softmax(len=16) + float GELU(len=32) OK
+  stem (C, synth w):      2.75 ms/img
+DONE
