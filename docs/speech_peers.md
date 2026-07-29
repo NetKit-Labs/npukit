@@ -70,10 +70,15 @@ Results (`host/speech_peers_metrics_fair.json`):
 
 On this setup **C wins cleanly** — blocking the CNN bag + giving the transformer resolution/sequential aux flips the earlier long-phrase story.
 
+**Optional follow-up (not run):** `FatRFCNN` in `host/speech_peers.py` — Fat CNN with a **large receptive field** over the utterance and **no GAP**, on this same fair set vs HT. Expected to underperform HT on order-only permutations (same lesson as the 27.8% causal CNN).
+
 ```bash
 python3 host/speech_peers.py --fair
 # metrics → host/speech_peers_metrics_fair.json
+# fair mode trains FatRFCNN when present; reuses HT weights if available
 ```
+
+Story GIFs: `viz/out/hybrid_transformer.gif`, `viz/out/speech_peers.gif`.
 
 ## Run
 

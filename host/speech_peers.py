@@ -42,6 +42,7 @@ HOST_DIR = Path(__file__).resolve().parent
 OUT_JSON = HOST_DIR / "speech_peers_metrics.json"
 WEIGHTS_DIR = HOST_DIR / "speech_peers_weights"
 VAL_NPZ = HOST_DIR / "speech_peers_val.npz"
+TRAIN_NPZ = HOST_DIR / "speech_peers_train.npz"
 MEL_FRAMES = logmel.N_FRAMES
 TOKEN_T = clm.LM_T  # 32 short; 64 long; 128 fair
 HYBRID_STEM = False
@@ -50,7 +51,7 @@ LAST_TOKEN_HEAD = False
 
 
 def configure_paths(*, long: bool = False, fair: bool = False) -> None:
-    global OUT_JSON, WEIGHTS_DIR, VAL_NPZ, MEL_FRAMES, TOKEN_T
+    global OUT_JSON, WEIGHTS_DIR, VAL_NPZ, TRAIN_NPZ, MEL_FRAMES, TOKEN_T
     global HYBRID_STEM, FAIR_MODE, LAST_TOKEN_HEAD
     if fair and long:
         raise ValueError("use either --fair or --long, not both")
@@ -59,6 +60,7 @@ def configure_paths(*, long: bool = False, fair: bool = False) -> None:
         OUT_JSON = HOST_DIR / "speech_peers_metrics_fair.json"
         WEIGHTS_DIR = HOST_DIR / "speech_peers_weights_fair"
         VAL_NPZ = HOST_DIR / "speech_peers_val_fair.npz"
+        TRAIN_NPZ = HOST_DIR / "speech_peers_train_fair.npz"
         MEL_FRAMES = logmel.N_FRAMES_LONG
         TOKEN_T = 128  # more temporal resolution for order
         HYBRID_STEM = True
@@ -69,6 +71,7 @@ def configure_paths(*, long: bool = False, fair: bool = False) -> None:
         OUT_JSON = HOST_DIR / "speech_peers_metrics_long.json"
         WEIGHTS_DIR = HOST_DIR / "speech_peers_weights_long"
         VAL_NPZ = HOST_DIR / "speech_peers_val_long.npz"
+        TRAIN_NPZ = HOST_DIR / "speech_peers_train_long.npz"
         MEL_FRAMES = logmel.N_FRAMES_LONG
         TOKEN_T = 64
         HYBRID_STEM = True
@@ -79,6 +82,7 @@ def configure_paths(*, long: bool = False, fair: bool = False) -> None:
         OUT_JSON = HOST_DIR / "speech_peers_metrics.json"
         WEIGHTS_DIR = HOST_DIR / "speech_peers_weights"
         VAL_NPZ = HOST_DIR / "speech_peers_val.npz"
+        TRAIN_NPZ = HOST_DIR / "speech_peers_train.npz"
         MEL_FRAMES = logmel.N_FRAMES
         TOKEN_T = clm.LM_T
         HYBRID_STEM = False
@@ -235,43 +239,50 @@ class DilatedCausalDSBlock(nn.Module):
 
 
 class FatRFCNN(nn.Module):
-    """Fat CNN with dilated causal stack covering the full mel length; no GAP.
+    """Fat CNN: downsample a bit, then dilated causal stack; no GAP.
 
-    Theoretical time RF with k=3 stem + dilations (1..256):
-      RF = 3 + 2*(1+2+...+256) = 3 + 2*511 = 1025 ≥ 1023 frames.
-    Classification uses the last time column only (order can survive).
+    Two stride-2 blocks shrink T≈1023→~255, then dilations (1..128) cover that
+    timeline so the last column sees the whole utterance. Order can survive
+    (unlike global average pooling).
     """
 
-    STEM_K = 3
+    STEM_K = 5
     BLOCK_K = 3
-    DILATIONS = (1, 2, 4, 8, 16, 32, 64, 128, 256)
+    DILATIONS = (1, 2, 4, 8, 16, 32, 64, 128)
 
     def __init__(self, n_class: int | None = None) -> None:
         super().__init__()
         n_class = ga.N_CMD if n_class is None else n_class
-        ch = 64
         self.stem_dw = nn.Conv2d(
             1, 1, kernel_size=(self.STEM_K, self.STEM_K), stride=1, padding=0, bias=False
         )
-        self.stem_pw = nn.Conv2d(1, ch, 1, bias=False)
-        self.stem_bn = nn.BatchNorm2d(ch)
+        self.stem_pw = nn.Conv2d(1, 48, 1, bias=False)
+        self.stem_bn = nn.BatchNorm2d(48)
+        # 4× temporal downsample before the expensive dilated stack.
+        self.down = nn.Sequential(
+            CausalDSBlock(48, 64, 5, stride_t=2),
+            CausalDSBlock(64, 80, 5, stride_t=2),
+        )
         blocks: list[nn.Module] = []
-        cin = ch
-        # Mild channel growth; keep ~HT param budget.
-        outs = (64, 64, 80, 80, 96, 96, 112, 112, 128)
+        cin = 80
+        outs = (80, 96, 96, 112, 112, 128, 128, 160)
         for d, cout in zip(self.DILATIONS, outs):
             blocks.append(DilatedCausalDSBlock(cin, cout, self.BLOCK_K, d))
             cin = cout
-        self.blocks = nn.Sequential(*blocks)
+        self.dilated = nn.Sequential(*blocks)
         self.fc = nn.Linear(cin, n_class)
-        self._rf = self.theoretical_receptive_field()
 
     @classmethod
     def theoretical_receptive_field(cls) -> int:
-        # Causal: RF grows by (k-1)*dilation per layer (stride 1).
-        rf = cls.STEM_K
+        """Lower-bound RF in input frames (stride-aware)."""
+        # stem k=5, then two stride-2 k=5 DS blocks, then dilated k=3 stack.
+        rf = float(cls.STEM_K)
+        jump = 1.0
+        for _ in range(2):
+            rf += (5 - 1) * jump
+            jump *= 2
         for d in cls.DILATIONS:
-            rf += (cls.BLOCK_K - 1) * d
+            rf += (cls.BLOCK_K - 1) * d * jump
         return int(rf)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -280,7 +291,8 @@ class FatRFCNN(nn.Module):
         x = F.pad(x, (pad_t, 0, pad_f, pad_f))
         x = self.stem_dw(x)
         x = F.relu(self.stem_bn(self.stem_pw(x)), inplace=True)
-        x = self.blocks(x)
+        x = self.down(x)
+        x = self.dilated(x)
         x = x[:, :, :, -1].mean(dim=-1)  # last time column; no GAP over time
         return self.fc(x)
 
@@ -552,12 +564,16 @@ def train_classifier(
         sched.step()
         model.eval()
         with torch.no_grad():
-            logits = model(torch.from_numpy(x_va))
-            acc = float((logits.argmax(-1) == torch.from_numpy(y_va)).float().mean())
+            # Batched val — full-canvas models OOM / crawl on one giant forward.
+            preds = []
+            y_t = torch.from_numpy(y_va)
+            for i in range(0, len(y_va), batch):
+                preds.append(model(torch.from_numpy(x_va[i : i + batch])).argmax(-1))
+            acc = float((torch.cat(preds) == y_t).float().mean())
         if acc >= best:
             best = acc
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-        print(f"  [{tag}] epoch {ep}/{epochs}  val_acc={100*acc:.1f}%")
+        print(f"  [{tag}] epoch {ep}/{epochs}  val_acc={100*acc:.1f}%", flush=True)
     if best_state is not None:
         model.load_state_dict(best_state)
     return best
@@ -617,7 +633,7 @@ def train_transformer_sequential(
         if acc >= best:
             best = acc
             best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-        print(f"  [{tag}] epoch {ep}/{epochs}  val_acc={100*acc:.1f}%")
+        print(f"  [{tag}] epoch {ep}/{epochs}  val_acc={100*acc:.1f}%", flush=True)
     if best_state is not None:
         model.load_state_dict(best_state)
     return best
@@ -773,7 +789,7 @@ class PeerResult:
 
 def _save_val_npz(x_va: np.ndarray, y_va: np.ndarray) -> None:
     np.savez_compressed(VAL_NPZ, images=x_va.astype(np.float32), labels=y_va.astype(np.int64))
-    print(f"saved val mel → {VAL_NPZ} (n={len(y_va)})")
+    print(f"saved val mel → {VAL_NPZ} (n={len(y_va)})", flush=True)
 
 
 def _load_val_npz() -> tuple[np.ndarray, np.ndarray]:
@@ -783,6 +799,39 @@ def _load_val_npz() -> tuple[np.ndarray, np.ndarray]:
         )
     z = np.load(VAL_NPZ)
     return z["images"].astype(np.float32), z["labels"].astype(np.int64)
+
+
+def _save_train_npz(
+    x_tr: np.ndarray, y_tr: np.ndarray, w_tr: np.ndarray, *, n_per_cmd: int
+) -> None:
+    np.savez_compressed(
+        TRAIN_NPZ,
+        images=x_tr.astype(np.float32),
+        labels=y_tr.astype(np.int64),
+        words=w_tr.astype(np.int64),
+        n_per_cmd=np.int64(n_per_cmd),
+    )
+    print(f"saved train mel → {TRAIN_NPZ} (n={len(y_tr)})", flush=True)
+
+
+def _load_train_npz(
+    n_per_cmd: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    if not TRAIN_NPZ.is_file():
+        return None
+    z = np.load(TRAIN_NPZ)
+    if int(z["n_per_cmd"]) != int(n_per_cmd):
+        print(
+            f"train cache n_per_cmd={int(z['n_per_cmd'])} != {n_per_cmd}; rebuilding",
+            flush=True,
+        )
+        return None
+    print(f"reuse train mel ← {TRAIN_NPZ} (n={len(z['labels'])})", flush=True)
+    return (
+        z["images"].astype(np.float32),
+        z["labels"].astype(np.int64),
+        z["words"].astype(np.int64),
+    )
 
 
 def run(args: argparse.Namespace) -> None:
@@ -875,11 +924,21 @@ def run(args: argparse.Namespace) -> None:
     else:
         n_tr = args.n_per_cmd
         n_va = max(8, args.n_per_cmd // 4)
-        print("Building datasets (may download GSC ~2GB once)...")
-        x_tr, y_tr, _, w_tr = ga.build_phrase_dataset(n_tr, seed=0, split="train")
-        x_va, y_va, _, w_va = ga.build_phrase_dataset(n_va, seed=1, split="val")
-        print(f"phrase train={len(y_tr)} val={len(y_va)} mel={x_tr.shape}")
-        _save_val_npz(x_va, y_va)
+        print("Building datasets (may download GSC ~2GB once)...", flush=True)
+        cached = None if getattr(args, "rebuild_data", False) else _load_train_npz(n_tr)
+        if cached is not None:
+            x_tr, y_tr, w_tr = cached
+        else:
+            x_tr, y_tr, _, w_tr = ga.build_phrase_dataset(n_tr, seed=0, split="train")
+            _save_train_npz(x_tr, y_tr, w_tr, n_per_cmd=n_tr)
+        if VAL_NPZ.is_file() and not getattr(args, "rebuild_data", False):
+            x_va, y_va = _load_val_npz()
+            print(f"reuse val mel ← {VAL_NPZ} (n={len(y_va)})", flush=True)
+            w_va = np.zeros((len(y_va), 0), dtype=np.int64)
+        else:
+            x_va, y_va, _, w_va = ga.build_phrase_dataset(n_va, seed=1, split="val")
+            _save_val_npz(x_va, y_va)
+        print(f"phrase train={len(y_tr)} val={len(y_va)} mel={x_tr.shape}", flush=True)
 
         # ---- A ----
         if fair:
@@ -1161,6 +1220,11 @@ def main() -> None:
         "--retrain-ht",
         action="store_true",
         help="with --fair, retrain HT instead of reusing audio_transformer.pt",
+    )
+    ap.add_argument(
+        "--rebuild-data",
+        action="store_true",
+        help="rebuild train/val mel caches from GSC (ignore *.npz caches)",
     )
     ap.add_argument(
         "--eval-only",

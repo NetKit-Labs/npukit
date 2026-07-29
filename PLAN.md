@@ -18,7 +18,7 @@ The **GEMM hardware MVP is complete**. Transformer **glue** (from VERSION `0x300
 
 **MNIST (bring-up only):** tiny-ViT + DS-CNN digit peers were a **fabric sanity check** while bringing up GEMM/DMA/tiling (~98% digits). Not the product target.
 
-**Optional later:** board packs for command-LM / fair HT, close WMEM 100 MHz timing, per-head scales (MHA), larger PE grid / model.
+**Optional later:** fair-race **Fat RF CNN (large RF, no GAP) vs HT** (scaffolded in `host/speech_peers.py`; expect HT still wins); board packs for command-LM / fair HT; close WMEM 100 MHz timing; per-head scales (MHA); larger PE grid / model.
 
 Docs: status [`docs/STATUS.md`](docs/STATUS.md), speech peers [`docs/speech_peers.md`](docs/speech_peers.md), command LM [`docs/command_lm.md`](docs/command_lm.md), WMEM/WS [`docs/weight_stationary.md`](docs/weight_stationary.md), FPGA vs CPU [`docs/transformer_split.md`](docs/transformer_split.md), glue [`docs/transformer_glue.md`](docs/transformer_glue.md), bring-up [`docs/glue_bringup.md`](docs/glue_bringup.md), tiling [`docs/tiling.md`](docs/tiling.md).
 

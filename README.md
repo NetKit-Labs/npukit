@@ -12,6 +12,16 @@ Part of [NetKit Labs](https://github.com/NetKit-Labs) — companion to [netkit](
 
 Host races on **stitched GSC WAVs** + shared log-mel (`sr=16k`, `n_fft=512`, `hop=256`, `n_mels=32`). Peers: **A** Fat/causal DS-CNN, **B** KWS+FSM, **C** hybrid DS-stem + transformer (HT). Details: [`docs/speech_peers.md`](docs/speech_peers.md), [`docs/command_lm.md`](docs/command_lm.md).
 
+![NpuKit hybrid transformer — order-sensitive robot speech commands](viz/out/hybrid_transformer.gif)
+
+(`python3 viz/hybrid_transformer_anim.py` → `viz/out/hybrid_transformer.gif`)
+
+Peer race story (long bag-CNN win → fair order-only HT win):
+
+![NpuKit speech peers — bag CNN vs hybrid transformer](viz/out/speech_peers.gif)
+
+(`python3 viz/speech_peers_anim.py` → `viz/out/speech_peers.gif`)
+
 ### Audio phrase peers (accuracy / params / weights)
 
 | Race | Winner | Acc | Params | ~int8 KiB | Notes |
@@ -26,6 +36,8 @@ Fair race (order is the only cue):
 |------|----:|-------:|---------:|----------:|----------:|
 | A Causal DS-CNN (no GAP) | 27.8% | 99,849 | 390 | 97.5 | 16.7 |
 | **C Hybrid transformer** | **96.5%** | **97,408** | **380** | **95.1** | **15.4** |
+
+**Optional follow-up (not run yet):** a **Fat CNN with a large receptive field** (dilated / full-utterance, **no GAP**) on the same fair 8-word set, vs HT. Scaffolding lives in `host/speech_peers.py` (`FatRFCNN`). We expect it to beat KWS+FSM but **still underperform HT** on order-only permutations.
 
 ### Text command-phrase LM (same GSC vocab)
 
@@ -50,6 +62,7 @@ python3 host/npukit_command_lm.py --phrase "go left"
 | yes | **GSC robot commands (text LM)** — intent head **100%** — [`docs/command_lm.md`](docs/command_lm.md) |
 | yes | Layer-resident weight bank (`FEAT_WMEM`); host default stays A∥B on tiny mats |
 | bring-up | MNIST tiny-ViT + DS-CNN peer — **sanity check only** while bringing up fabric (~98% digits) |
+| later | Optional fair-race **Fat RF CNN (no GAP) vs HT** (expect HT still wins) |
 | later | Board packs for command-LM / fair HT; close WMEM 100 MHz timing; MHA per-head scales |
 
 Full write-up: **[`docs/STATUS.md`](docs/STATUS.md)**. Speech peers: **[`docs/speech_peers.md`](docs/speech_peers.md)**. WMEM: **[`docs/weight_stationary.md`](docs/weight_stationary.md)**.

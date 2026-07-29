@@ -1,6 +1,6 @@
 # NpuKit status
 
-Checkpoint **2026-07-28**: **robotic Google Speech Commands** tracks are **complete** on the host; MNIST was only a **fabric / bring-up sanity check**.
+Checkpoint **2026-07-28**: **robotic Google Speech Commands** tracks are **complete** on the host; MNIST was only a **fabric / bring-up sanity check**. An optional **Fat RF CNN vs HT** fair-race comparison is scaffolded but **not finished**.
 
 ## Product track vs bring-up
 
@@ -9,10 +9,13 @@ Checkpoint **2026-07-28**: **robotic Google Speech Commands** tracks are **compl
 | **GSC robot commands (audio + text)** | Target application story | **Complete** (host metrics) |
 | **MNIST tiny-ViT / DS-CNN** | Sanity check while bringing up systolic GEMM, DMA, tiling | Done — **not** the product target |
 | **Hardware MVP** (`VERSION 0x302`) | 8×8 int8 GEMM + glue + WMEM | Board green |
+| **Fat RF CNN vs HT** (fair 8-word) | Extra CNN baseline (large RF, no GAP) | **Optional / pending** — expect HT still wins |
 
 ## Robot commands (Google Speech Commands) — results
 
 Shared front-end: stitched GSC WAVs, log-mel `sr=16k`, `n_fft=512`, `hop=256`, `n_mels=32`. Docs: [`speech_peers.md`](speech_peers.md), [`command_lm.md`](command_lm.md).
+
+Story GIFs: [`viz/out/hybrid_transformer.gif`](../viz/out/hybrid_transformer.gif), [`viz/out/speech_peers.gif`](../viz/out/speech_peers.gif).
 
 ### Audio peers
 
@@ -30,6 +33,12 @@ Fair race detail (order is the only class cue; same word multiset, permutations)
 | **C Hybrid transformer** | **96.5%** | **97,408** | **380.5** | **95.1** | **15.4** |
 
 Takeaway: bag/content CNNs win short/long when phrases differ in words; when **order** is all that matters, **HT wins cleanly**.
+
+### Optional next comparison (not run)
+
+**Fat CNN with a large receptive field** (dilated stack over the utterance, **no global average pooling**) on the same fair 8-word set, vs HT. Code scaffolding: `FatRFCNN` in `host/speech_peers.py` (`python3 host/speech_peers.py --fair`).
+
+Expectation: should beat KWS+FSM-style pipelines, but **likely still underperform HT** on order-only permutations (same lesson as the causal no-GAP CNN at 27.8%).
 
 ### Text command-phrase LM
 
@@ -65,9 +74,10 @@ Used to prove fabric + host before GSC work — **not** the deployment goal.
 
 ## Still optionally valuable
 
-1. Board bring-up for command-LM / fair HT packs on PYNQ
-2. Close **100 MHz timing** on the WMEM bitstream
-3. Multi-head attention + per-head scales
-4. Larger PE grid only after host traffic is no longer the limit
+1. **Fair-race Fat RF CNN (no GAP) vs HT** — scaffolded; expect HT still wins
+2. Board bring-up for command-LM / fair HT packs on PYNQ
+3. Close **100 MHz timing** on the WMEM bitstream
+4. Multi-head attention + per-head scales
+5. Larger PE grid only after host traffic is no longer the limit
 
 Related: [`speech_peers.md`](speech_peers.md), [`command_lm.md`](command_lm.md), [`weight_stationary.md`](weight_stationary.md), [`../PLAN.md`](../PLAN.md), [`../README.md`](../README.md).
