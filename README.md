@@ -1,53 +1,71 @@
 # NpuKit
 
-FPGA mini-NPU for the [PYNQ-Z2](https://www.tulembedded.com/FPGA/ProductsPYNQ-Z2.html) (Xilinx **Zynq-7020**): an **8×8 int8** output-stationary **systolic GEMM** (AXI4-Lite + AXI DMA) plus **transformer glue** (residual / GELU / RMSNorm / Softmax, `MAX_LEN=16`, 100 MHz). The Zynq A9 host tiles matmuls, runs a tiny **DS-stem** + float Softmax/RMSNorm/GELU, and schedules deploy-quantized **tiny-ViT** blocks (int8 GEMM on PL) on MNIST (~**98.0%**); a host **MCU-class DS-CNN** peer (~**98%** int8) sits beside it for edge compare.
+FPGA mini-NPU for the [PYNQ-Z2](https://www.tulembedded.com/FPGA/ProductsPYNQ-Z2.html) (Xilinx **Zynq-7020**): an **8×8 int8** output-stationary **systolic GEMM** (AXI4-Lite + AXI DMA) plus **transformer glue**, aimed at **edge robot command** workloads built from [Google Speech Commands](https://www.tensorflow.org/datasets/catalog/speech_commands) audio (and a text command-phrase LM over the same vocab).
+
+**MNIST digit ViT / DS-CNN work was only a fabric sanity check** — used while bringing up the systolic array, DMA path, and host tiling on PYNQ-Z2. It is **not** the product target; the completed application track is **robotic speech commands**.
 
 Part of [NetKit Labs](https://github.com/NetKit-Labs) — companion to [netkit](https://github.com/NetKit-Labs/netkit) (MCU/MPU inference), focused here on **custom FPGA acceleration** for edge transformers.
 
-**Keywords:** FPGA · PYNQ-Z2 · Zynq-7020 · systolic array · int8 GEMM · NPU · AXI DMA · transformer · ViT · MNIST · TinyML · QAT · DS-CNN · edge AI
+**Keywords:** FPGA · PYNQ-Z2 · Zynq-7020 · systolic array · int8 GEMM · NPU · AXI DMA · transformer · Google Speech Commands · robot commands · TinyML · QAT · DS-CNN · edge AI
+
+## Robot commands (Google Speech Commands) — completed
+
+Host races on **stitched GSC WAVs** + shared log-mel (`sr=16k`, `n_fft=512`, `hop=256`, `n_mels=32`). Peers: **A** Fat/causal DS-CNN, **B** KWS+FSM, **C** hybrid DS-stem + transformer (HT). Details: [`docs/speech_peers.md`](docs/speech_peers.md), [`docs/command_lm.md`](docs/command_lm.md).
+
+### Audio phrase peers (accuracy / params / weights)
+
+| Race | Winner | Acc | Params | ~int8 KiB | Notes |
+|------|--------|----:|-------:|----------:|-------|
+| **Short** (1–2 word) | A Fat DS-CNN | **92.0%** | 37.7k | 36.8 | B KWS+FSM 25.8%; C HT 75.2% |
+| **Long** (9-word scripts) | A Fat DS-CNN | **84.5%** | 102k | 99.7 | B **0%**; C HT 50% (content still helps CNN) |
+| **Fair order-only** (8-word same multiset) | **C Hybrid transformer** | **96.5%** | 97.4k | 95.1 | A causal CNN **27.8%** / 99.8k — order needs HT |
+
+Fair race (order is the only cue):
+
+| Peer | Acc | Params | fp32 KiB | ~int8 KiB | ms/phrase |
+|------|----:|-------:|---------:|----------:|----------:|
+| A Causal DS-CNN (no GAP) | 27.8% | 99,849 | 390 | 97.5 | 16.7 |
+| **C Hybrid transformer** | **96.5%** | **97,408** | **380** | **95.1** | **15.4** |
+
+### Text command-phrase LM (same GSC vocab)
+
+| Metric | Result |
+|--------|--------|
+| Geometry | T=32 × D=32 × MLP=64 × L=6, V=42, 30 intents |
+| Command / intent (numpy deploy) | **100%** |
+| Next-token (shared prefixes) | ~51–55% (near oracle) |
+
+```bash
+python3 host/speech_peers.py --fair          # order-only HT vs CNN
+python3 host/npukit_command_lm.py --phrase "go left"
+```
 
 ## Where we are
 
 | Done | Item |
 |:---:|---|
-| yes | `pe` — int8 × int8 → int32 MAC, with clear / enable and A/B forward |
-| yes | `systolic_array` — 8×8 PE grid (A west→east, B north→south, C stationary) |
-| yes | Icarus testbenches: `pe_tb`, `systolic_array_tb`, `npukit_axil_tb` |
-| yes | BRAM-backed A/B/C tile storage, DSP-preferred PE MACs |
-| yes | AXI4-Lite control + AXI-Stream tile ports; Vivado BD adds AXI DMA via PS HP0 |
-| yes | Board face: LD0 heartbeat, LD1 busy, LD2 done; BTN0 = reset hold |
-| yes | Python host on PYNQ: `npukit_matmul.py` + notebook wrapper (classic 8×8 + tiled suites) |
-| yes | Board bring-up verified on PYNQ-Z2 (DMA + AXI-Lite control, **12/12 PASS**) |
-| yes | Keep both paths: DMA for matrix tiles, MMIO/AXI-Lite for control (+ fallback) |
-| yes | Saved notebook run: classic 8×8 + tiled 16×16 / 32×32 dumps in `npukit_matmul.ipynb` |
-| yes | **Hardware MVP complete** (GEMM) |
-| yes | Transformer glue (`rtl/npukit_glue.sv`): residual / GELU / RMSNorm / Softmax — board PASS @ 100 MHz |
-| yes | Host `host/npukit_transformer.py` + `.ipynb` (glue + GEMM); RoPE / mask / reshape stay on A9 |
-| yes | E2E 1-layer smoke T=8×D=8 + fixed scales — `host/npukit_transformer_e2e.ipynb` (**ALL E2E PASS**) |
-| yes | MNIST tiny-ViT: richer CPU DS-stem (MID=24) + T=16×D=16×MLP32×L=4, per-channel weights, A9 float norms, int8 GEMM (~**98.0%** numpy/full test) |
-| yes | Host MCU-class DS-CNN MNIST peer (int8 ~**98.4%** / ~8 KiB; vs MCU+NpuKit tiny-ViT ~**98.0%** / ~13 KiB) |
-| yes | Full board smoke with new weights: `host/npukit_board_smoke.ipynb` — **ALL SMOKE PASS**; ViT n=64 ref/hw **96.9%**, agree **100%** |
-| yes | Layer-resident weight bank (`VERSION 0x302`, `FEAT_WMEM`): load `W` once, A-only kicks — board correct; default host stays A∥B (faster on tiny-ViT) |
-| yes | Command-phrase tiny LM (text): T=32×D=32×L=6 + 30-way intent head — host intent **100%** — [`docs/command_lm.md`](docs/command_lm.md) |
-| yes | Speech peers (audio log-mel): short / long / fair races; fair order-only C **96.5%** vs A **27.8%** — [`docs/speech_peers.md`](docs/speech_peers.md) |
-| later | Board bring-up for command-LM / fair HT packs; close WMEM 100 MHz timing; MHA per-head scales |
+| yes | **Hardware MVP** — 8×8 int8 GEMM + glue + DMA/AXI-Lite @ 100 MHz (`VERSION 0x302`) |
+| yes | Board smoke (matmul / glue / e2e / ViT path) — **ALL SMOKE PASS** |
+| yes | **GSC robot commands (audio peers)** — short / long / fair races complete — [`docs/speech_peers.md`](docs/speech_peers.md) |
+| yes | **GSC robot commands (text LM)** — intent head **100%** — [`docs/command_lm.md`](docs/command_lm.md) |
+| yes | Layer-resident weight bank (`FEAT_WMEM`); host default stays A∥B on tiny mats |
+| bring-up | MNIST tiny-ViT + DS-CNN peer — **sanity check only** while bringing up fabric (~98% digits) |
+| later | Board packs for command-LM / fair HT; close WMEM 100 MHz timing; MHA per-head scales |
 
-Status write-up (done + next): **[`docs/STATUS.md`](docs/STATUS.md)**. Speech peers: **[`docs/speech_peers.md`](docs/speech_peers.md)**. WMEM: **[`docs/weight_stationary.md`](docs/weight_stationary.md)**.
+Full write-up: **[`docs/STATUS.md`](docs/STATUS.md)**. Speech peers: **[`docs/speech_peers.md`](docs/speech_peers.md)**. WMEM: **[`docs/weight_stationary.md`](docs/weight_stationary.md)**.
 
-## Edge peers (MCU vs MCU+accelerator)
+## MNIST bring-up (sanity check only)
 
-Same MNIST task, two **deployment-shaped** models — not a param-matched bake-off:
+MNIST was used to **exercise the FPGA fabric and host stack** (tiling, DMA, int8 GEMM, smoke notebooks) — not as the end application.
 
 | Peer | Role | Headline |
 |------|------|----------|
-| **DS-CNN** (`host/dscnn_mnist*.py`) | TinyML CNN you’d run on a Cortex-M / TFLite Micro–class MCU | int8 **~98.4%** / ~**8.3 KiB** (host; not on FPGA) |
-| **Tiny-ViT** (`host/npukit_vit_mnist*.py`) | CPU DS-stem + FPGA int8 GEMM + A9 float Softmax/RMSNorm/GELU | deploy-quant **~98.0%** / ~**13 KiB** (board **ALL SMOKE PASS** / **ALL VIT PASS** with MID=24 stem) |
+| **DS-CNN** (`host/dscnn_mnist*.py`) | MCU-class CNN reference (host) | int8 **~98.4%** / ~**8.3 KiB** |
+| **Tiny-ViT** (`host/npukit_vit_mnist*.py`) | CPU stem + PL GEMM + A9 float norms | deploy-quant **~98.0%** / ~**13 KiB** |
 
-Compare **accuracy + weight KiB + where compute runs**. Details: [`docs/STATUS.md`](docs/STATUS.md).
+![NpuKit MNIST bring-up peers](viz/out/edge_peers.gif)
 
-![NpuKit edge peers — MCU DS-CNN vs MCU+accelerator tiny-ViT](viz/out/edge_peers.gif)
-
-Animated story (`python3 viz/edge_peers_anim.py` → `viz/out/edge_peers.gif`). LinkedIn tip: native video is sharper if you re-export; the GIF is feed-friendly.
+(`python3 viz/edge_peers_anim.py` → `viz/out/edge_peers.gif`)
 
 ## 5-minute board bring-up
 

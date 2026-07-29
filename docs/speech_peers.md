@@ -1,5 +1,7 @@
 # Speech peers (log-mel command phrases)
 
+**Status: complete (host).** This is the NpuKit **robot-command** application track (Google Speech Commands audio). MNIST digit work elsewhere in the repo was only FPGA bring-up / sanity check.
+
 Three peers on the **same** stitched Google Speech Commands phrases and the **same** log-mel front-end.
 
 ## Front-end (shared)

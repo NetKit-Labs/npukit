@@ -14,15 +14,11 @@ Start a **small NPU** on PYNQ-Z2: an **8×8 int8 systolic array**, built and ver
 
 The **GEMM hardware MVP is complete**. Transformer **glue** (from VERSION `0x300`: residual / GELU / RMSNorm / Softmax, `MAX_LEN=16`) meets **100 MHz** and passes on PYNQ-Z2 with `host/npukit_transformer.py`. Current bitstreams are **`VERSION 0x302`**: weight-stationary + A ping-pong (`FEAT_WS|PP`) and **layer-resident weight bank** (`FEAT_WMEM` — load full `K×N` once, stream A-only). Host default stays A∥B on tiny-ViT; opt in with `NPUKIT_WMEM=1`. See [`docs/weight_stationary.md`](docs/weight_stationary.md).
 
-**Host ViT path done for this MVP:** MNIST tiny-ViT **T=16×D=16×MLP32×L=4**, richer DS-stem, per-channel weights, **deploy-faithful QAT**. Numpy deploy-quant **~98.0%** on full test; board smoke **ALL VIT PASS** / pred agree **100%**.
+**Application track (complete on host):** Google Speech Commands **robot commands** — audio peers (short / long / fair) + text command-phrase LM. Fair order-only: hybrid transformer **96.5%** vs causal CNN **27.8%**. See [`docs/speech_peers.md`](docs/speech_peers.md), [`docs/command_lm.md`](docs/command_lm.md), and the results tables in [`README.md`](README.md).
 
-**Edge peers (not param-matched):** (1) **MCU-class DS-CNN** — TinyML DW/PW CNN, host int8 ~**98.4%** / ~8 KiB (`host/train_dscnn_mnist.py`); (2) **MCU/MPU + accelerator tiny-ViT** — on NpuKit, deploy-quant ~**98.0%** / ~13 KiB. Compare accuracy + footprint + where compute runs.
+**MNIST (bring-up only):** tiny-ViT + DS-CNN digit peers were a **fabric sanity check** while bringing up GEMM/DMA/tiling (~98% digits). Not the product target.
 
-**Command-phrase track (host done):** Speech Commands vocab + robot intents, T=32×D=32×L=6 causal LM + 30-way command head — intent **100%** numpy deploy; see [`docs/command_lm.md`](docs/command_lm.md).
-
-**Speech peers (host done):** same log-mel audio; short/long/fair races — fair order-only: hybrid transformer **96.5%** vs causal DS-CNN **27.8%**; see [`docs/speech_peers.md`](docs/speech_peers.md).
-
-**Optional later:** board bring-up for command-LM / fair HT packs, close WMEM 100 MHz timing, per-head scales (MHA), fuse KWS audio into the text LM body, larger PE grid / model.
+**Optional later:** board packs for command-LM / fair HT, close WMEM 100 MHz timing, per-head scales (MHA), larger PE grid / model.
 
 Docs: status [`docs/STATUS.md`](docs/STATUS.md), speech peers [`docs/speech_peers.md`](docs/speech_peers.md), command LM [`docs/command_lm.md`](docs/command_lm.md), WMEM/WS [`docs/weight_stationary.md`](docs/weight_stationary.md), FPGA vs CPU [`docs/transformer_split.md`](docs/transformer_split.md), glue [`docs/transformer_glue.md`](docs/transformer_glue.md), bring-up [`docs/glue_bringup.md`](docs/glue_bringup.md), tiling [`docs/tiling.md`](docs/tiling.md).
 
@@ -85,9 +81,8 @@ An int8 8×8 GEMM covers MLP/FC and 1×1 conv; standard conv can be lowered to G
 - Weight-stationary + A ping-pong + layer-resident WMEM (`VERSION 0x302`): **done** (board functional; WMEM not faster on tiny-ViT — see [`docs/weight_stationary.md`](docs/weight_stationary.md)).
 - Synthetic 1-layer e2e T=8×D=8: **done** (**ALL E2E PASS** in `host/npukit_transformer_e2e.ipynb`).
 - MNIST tiny-ViT T=16×D=16×MLP32×L=4 + per-channel scales + deploy-faithful QAT: **done** (numpy/full test **~98.0%**; board **ALL VIT PASS**; see [`docs/STATUS.md`](docs/STATUS.md)).
-- Host DS-CNN MNIST reference: **done** (float **98.00%** / int8 **98.39%** / 10k; not FPGA; see [`docs/STATUS.md`](docs/STATUS.md)).
-- Command-phrase tiny LM (text): **done** on host (intent **100%**; C++ pack; board optional).
-- Speech peers (audio log-mel short/long/fair): **done** on host; fair C win documented in [`docs/speech_peers.md`](docs/speech_peers.md).
+- Host DS-CNN MNIST reference: **done** as bring-up only (float **98.00%** / int8 **98.39%**).
+- GSC robot commands (text LM + audio peers short/long/fair): **done** on host — see [`README.md`](README.md) results tables.
 - Rebuild with `../scripts/build_bitstream.sh npukit` (or in-repo `scripts/`) after RTL/BD changes.
 
 ### Z7020 size note

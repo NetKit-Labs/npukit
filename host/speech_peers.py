@@ -7,9 +7,9 @@ Same phrase inventory + log-mel for all peers
 Modes:
   short (default) — 1–2 word commands, 2.048 s / 127 frames
   --long          — 9-word scripts, 16.384 s / 1023 frames
-  --fair          — order-only permutations; causal CNN vs hybrid transformer
+  --fair          — order-only permutations; full-RF Fat CNN (no GAP) vs HT
 
-Reports accuracy + KiB + ms/phrase for each peer.
+Reports accuracy + params + KiB + ms/phrase for each peer.
 
 Usage:
   python3 host/speech_peers.py              # short phrases
@@ -201,6 +201,87 @@ class CausalDSCNN(nn.Module):
         x = self.blocks(x)
         # Last time column → mean over mel → logits (no bag-over-time pool).
         x = x[:, :, :, -1].mean(dim=-1)
+        return self.fc(x)
+
+
+class DilatedCausalDSBlock(nn.Module):
+    """Depthwise-separable block: causal dilated time, symmetric mel, stride 1."""
+
+    def __init__(self, cin: int, cout: int, k: int, dilation: int) -> None:
+        super().__init__()
+        self.k = k
+        self.dilation = dilation
+        self.dw = nn.Conv2d(
+            cin,
+            cin,
+            kernel_size=(k, k),
+            stride=1,
+            padding=0,
+            dilation=(1, dilation),
+            groups=cin,
+            bias=False,
+        )
+        self.bn1 = nn.BatchNorm2d(cin)
+        self.pw = nn.Conv2d(cin, cout, 1, bias=False)
+        self.bn2 = nn.BatchNorm2d(cout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        pad_t = (self.k - 1) * self.dilation
+        pad_f = self.k // 2
+        x = F.pad(x, (pad_t, 0, pad_f, pad_f))
+        x = F.relu(self.bn1(self.dw(x)), inplace=True)
+        x = F.relu(self.bn2(self.pw(x)), inplace=True)
+        return x
+
+
+class FatRFCNN(nn.Module):
+    """Fat CNN with dilated causal stack covering the full mel length; no GAP.
+
+    Theoretical time RF with k=3 stem + dilations (1..256):
+      RF = 3 + 2*(1+2+...+256) = 3 + 2*511 = 1025 ≥ 1023 frames.
+    Classification uses the last time column only (order can survive).
+    """
+
+    STEM_K = 3
+    BLOCK_K = 3
+    DILATIONS = (1, 2, 4, 8, 16, 32, 64, 128, 256)
+
+    def __init__(self, n_class: int | None = None) -> None:
+        super().__init__()
+        n_class = ga.N_CMD if n_class is None else n_class
+        ch = 64
+        self.stem_dw = nn.Conv2d(
+            1, 1, kernel_size=(self.STEM_K, self.STEM_K), stride=1, padding=0, bias=False
+        )
+        self.stem_pw = nn.Conv2d(1, ch, 1, bias=False)
+        self.stem_bn = nn.BatchNorm2d(ch)
+        blocks: list[nn.Module] = []
+        cin = ch
+        # Mild channel growth; keep ~HT param budget.
+        outs = (64, 64, 80, 80, 96, 96, 112, 112, 128)
+        for d, cout in zip(self.DILATIONS, outs):
+            blocks.append(DilatedCausalDSBlock(cin, cout, self.BLOCK_K, d))
+            cin = cout
+        self.blocks = nn.Sequential(*blocks)
+        self.fc = nn.Linear(cin, n_class)
+        self._rf = self.theoretical_receptive_field()
+
+    @classmethod
+    def theoretical_receptive_field(cls) -> int:
+        # Causal: RF grows by (k-1)*dilation per layer (stride 1).
+        rf = cls.STEM_K
+        for d in cls.DILATIONS:
+            rf += (cls.BLOCK_K - 1) * d
+        return int(rf)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        pad_t = self.STEM_K - 1
+        pad_f = self.STEM_K // 2
+        x = F.pad(x, (pad_t, 0, pad_f, pad_f))
+        x = self.stem_dw(x)
+        x = F.relu(self.stem_bn(self.stem_pw(x)), inplace=True)
+        x = self.blocks(x)
+        x = x[:, :, :, -1].mean(dim=-1)  # last time column; no GAP over time
         return self.fc(x)
 
 
@@ -729,11 +810,23 @@ def run(args: argparse.Namespace) -> None:
         x_va, y_va = _load_val_npz()
         print(f"eval-only: val={len(y_va)} mel={x_va.shape} (no train / no GSC)")
         if fair:
-            a: nn.Module = CausalDSCNN()
-            a.load_state_dict(torch.load(WEIGHTS_DIR / "causal_dscnn.pt", map_location="cpu"))
+            a_path = WEIGHTS_DIR / "fat_rf_cnn.pt"
+            if not a_path.is_file():
+                a_path = WEIGHTS_DIR / "causal_dscnn.pt"
+                a = CausalDSCNN()
+                a_name, a_note = "A_causal_dscnn", "causal last-frame CNN (eval-only)"
+            else:
+                a = FatRFCNN()
+                a_name = "A_fat_rf_cnn"
+                a_note = (
+                    f"dilated Fat CNN RF={FatRFCNN.theoretical_receptive_field()} "
+                    f"frames; last column; no GAP (eval-only)"
+                )
+            a.load_state_dict(torch.load(a_path, map_location="cpu"))
         else:
             a = FatDSCNN(long=long)
             a.load_state_dict(torch.load(WEIGHTS_DIR / "fat_dscnn.pt", map_location="cpu"))
+            a_name, a_note = "A_fat_dscnn", "bag CNN (eval-only)"
         c = AudioCommandTransformer()
         c.load_state_dict(torch.load(WEIGHTS_DIR / "audio_transformer.pt", map_location="cpu"))
         xb0 = torch.from_numpy(x_va[:1])
@@ -741,13 +834,13 @@ def run(args: argparse.Namespace) -> None:
         ms_a = bench_ms(lambda: a(xb0))
         results.append(
             PeerResult(
-                "A_causal_dscnn" if fair else "A_fat_dscnn",
+                a_name,
                 acc_a,
                 count_params(a),
                 kib_fp32(count_params(a)),
                 kib_int8(count_params(a)),
                 ms_a,
-                "causal last-frame CNN (eval-only)" if fair else "bag CNN (eval-only)",
+                a_note,
             )
         )
         if not fair:
@@ -790,13 +883,25 @@ def run(args: argparse.Namespace) -> None:
 
         # ---- A ----
         if fair:
-            print("\n=== (A) Causal DS-CNN (no global pool) ===")
-            a = CausalDSCNN()
+            rf = FatRFCNN.theoretical_receptive_field()
+            print(
+                f"\n=== (A) Fat RF CNN (no GAP; theoretical RF={rf} ≥ {MEL_FRAMES} frames) ==="
+            )
+            a = FatRFCNN()
+            n_a = count_params(a)
+            print(
+                f"  params={n_a:,}  fp32={kib_fp32(n_a):.1f} KiB  "
+                f"int8~={kib_int8(n_a):.1f} KiB"
+            )
             train_classifier(
                 a, x_tr, y_tr, x_va, y_va, epochs=args.epochs, batch=args.batch, lr=2e-3, tag="A"
             )
-            torch.save(a.state_dict(), WEIGHTS_DIR / "causal_dscnn.pt")
-            a_name, a_note = "A_causal_dscnn", "causal DS-CNN; last time column only (no bag pool)"
+            torch.save(a.state_dict(), WEIGHTS_DIR / "fat_rf_cnn.pt")
+            a_name = "A_fat_rf_cnn"
+            a_note = (
+                f"dilated Fat CNN RF={rf} frames; last time column; no GAP "
+                f"(params={n_a:,})"
+            )
         else:
             print("\n=== (A) Fat DS-CNN ===")
             a = FatDSCNN(long=long)
@@ -811,13 +916,18 @@ def run(args: argparse.Namespace) -> None:
         acc_a = accuracy_classifier(a, x_va, y_va)
         xb0 = torch.from_numpy(x_va[:1])
         ms_a = bench_ms(lambda: a(xb0))
+        n_a = count_params(a)
+        print(
+            f"  A done: acc={100*acc_a:.1f}%  params={n_a:,}  "
+            f"fp32={kib_fp32(n_a):.1f} KiB  int8~={kib_int8(n_a):.1f} KiB  ms={ms_a:.2f}"
+        )
         results.append(
             PeerResult(
                 a_name,
                 acc_a,
-                count_params(a),
-                kib_fp32(count_params(a)),
-                kib_int8(count_params(a)),
+                n_a,
+                kib_fp32(n_a),
+                kib_int8(n_a),
                 ms_a,
                 a_note,
             )
@@ -859,8 +969,18 @@ def run(args: argparse.Namespace) -> None:
         # ---- C ----
         print("\n=== (C) Mel-stem + Transformer ===")
         c = AudioCommandTransformer()
+        n_c = count_params(c)
+        print(
+            f"  params={n_c:,}  fp32={kib_fp32(n_c):.1f} KiB  "
+            f"int8~={kib_int8(n_c):.1f} KiB"
+        )
         c_batch = max(4, args.batch // (4 if (long or fair) else 2))
-        if fair:
+        ht_path = WEIGHTS_DIR / "audio_transformer.pt"
+        reuse_ht = bool(fair and ht_path.is_file() and not getattr(args, "retrain_ht", False))
+        if reuse_ht:
+            print(f"  reuse saved HT weights: {ht_path}")
+            c.load_state_dict(torch.load(ht_path, map_location="cpu"))
+        elif fair:
             train_transformer_sequential(
                 c,
                 x_tr,
@@ -873,6 +993,7 @@ def run(args: argparse.Namespace) -> None:
                 lr=2e-3,
                 tag="C",
             )
+            torch.save(c.state_dict(), ht_path)
         else:
             train_classifier(
                 c,
@@ -885,20 +1006,49 @@ def run(args: argparse.Namespace) -> None:
                 lr=2e-3,
                 tag="C",
             )
-        torch.save(c.state_dict(), WEIGHTS_DIR / "audio_transformer.pt")
+            torch.save(c.state_dict(), ht_path)
         acc_c = accuracy_classifier(c, x_va, y_va)
         ms_c = bench_ms(lambda: c(xb0))
+        print(
+            f"  C done: acc={100*acc_c:.1f}%  params={n_c:,}  "
+            f"fp32={kib_fp32(n_c):.1f} KiB  int8~={kib_int8(n_c):.1f} KiB  ms={ms_c:.2f}"
+        )
         results.append(
             PeerResult(
                 "C_transformer_torch",
                 acc_c,
-                count_params(c),
-                kib_fp32(count_params(c)),
-                kib_int8(count_params(c)),
+                n_c,
+                kib_fp32(n_c),
+                kib_int8(n_c),
                 ms_c,
-                c_note + " (Torch float GEMM)",
+                c_note + (" (reused weights)" if reuse_ht else " (Torch float GEMM)"),
             )
         )
+
+        # Fair race: also report prior causal CNN if weights exist (params/acc reference).
+        if fair:
+            causal_path = WEIGHTS_DIR / "causal_dscnn.pt"
+            if causal_path.is_file():
+                causal = CausalDSCNN()
+                causal.load_state_dict(torch.load(causal_path, map_location="cpu"))
+                n_ca = count_params(causal)
+                acc_ca = accuracy_classifier(causal, x_va, y_va)
+                ms_ca = bench_ms(lambda: causal(xb0))
+                print(
+                    f"  prior causal CNN: acc={100*acc_ca:.1f}%  params={n_ca:,}  "
+                    f"fp32={kib_fp32(n_ca):.1f} KiB  int8~={kib_int8(n_ca):.1f} KiB"
+                )
+                results.append(
+                    PeerResult(
+                        "A_causal_dscnn_ref",
+                        acc_ca,
+                        n_ca,
+                        kib_fp32(n_ca),
+                        kib_int8(n_ca),
+                        ms_ca,
+                        "prior causal DS-CNN (saved weights; RF≪full canvas)",
+                    )
+                )
 
     # ---- C NpuKit int8 (skip for fair / long accuracy races by default) ----
     if not getattr(args, "skip_npukit", False):
@@ -960,13 +1110,15 @@ def run(args: argparse.Namespace) -> None:
         )
 
     print("\n=== Peer summary ===")
-    print(f"{'peer':22} {'acc%':>8} {'params':>10} {'KiB_f32':>8} {'KiB_i8~':>8} {'ms':>8}")
+    print(
+        f"\n{'peer':24} {'acc%':>8} {'params':>10} {'weights_f32':>11} "
+        f"{'weights_i8~':>11} {'ms':>8}"
+    )
     for r in results:
-        acc_s = f"{100*r.accuracy:8.1f}" if r.ms_per_phrase >= 0 and r.notes[:3] != "no " else f"{100*r.accuracy:8.1f}"
         ms_s = f"{r.ms_per_phrase:8.2f}" if r.ms_per_phrase >= 0 else f"{'n/a':>8}"
         print(
-            f"{r.name:22} {acc_s} {r.params:10d} {r.kib_fp32:8.1f} "
-            f"{r.kib_int8_est:8.1f} {ms_s}"
+            f"{r.name:24} {100*r.accuracy:8.1f} {r.params:10,d} "
+            f"{r.kib_fp32:10.1f}KiB {r.kib_int8_est:10.1f}KiB {ms_s}"
         )
 
     payload = {
@@ -982,6 +1134,7 @@ def run(args: argparse.Namespace) -> None:
         },
         "token_t": TOKEN_T,
         "hybrid_stem": HYBRID_STEM,
+        "fat_rf_frames": FatRFCNN.theoretical_receptive_field() if fair else None,
         "n_commands": ga.N_CMD,
         "commands": [" ".join(cmd) for cmd in ga.AUDIO_ROBOT_COMMANDS],
         "peers": [asdict(r) for r in results],
@@ -1002,7 +1155,12 @@ def main() -> None:
     ap.add_argument(
         "--fair",
         action="store_true",
-        help="order-only permutations; causal CNN vs hybrid transformer",
+        help="order-only permutations; full-RF Fat CNN (no GAP) vs hybrid transformer",
+    )
+    ap.add_argument(
+        "--retrain-ht",
+        action="store_true",
+        help="with --fair, retrain HT instead of reusing audio_transformer.pt",
     )
     ap.add_argument(
         "--eval-only",

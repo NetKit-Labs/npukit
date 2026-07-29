@@ -1,5 +1,7 @@
 # Tiny command-phrase LM (Speech Commands vocab)
 
+**Status: complete (host).** Text-side robot intents over the Google Speech Commands vocab (companion to the [audio speech peers](speech_peers.md)). MNIST was bring-up only.
+
 Geometry: **T=32 × D=32 × MLP=64 × L=6**, causal decoder, int8 GEMM on NpuKit, float Softmax/RMSNorm/GELU on the A9.
 
 ## What this is
