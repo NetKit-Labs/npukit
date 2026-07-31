@@ -2,7 +2,7 @@
 
 **NpuKit** is an FPGA **NPU** for the [PYNQ-Z2](https://www.tulembedded.com/FPGA/ProductsPYNQ-Z2.html) (Xilinx **Zynq-7020**): an **8×8 int8** **output-stationary systolic** GEMM array with AXI4-Lite control, AXI DMA tile I/O, and on-fabric **transformer glue** (Softmax / RMSNorm / residual / GELU path) for tiny edge transformers.
 
-**MNIST digits** (tiny-ViT + DS-CNN peer) were used to **prove out the fabric** — systolic array, DMA, host tiling, and int8 deploy path on the board. **Robot command** workloads built from [Google Speech Commands](https://www.tensorflow.org/datasets/catalog/speech_commands) (audio phrase peers + a text command-phrase LM over the same vocab) are the **end-to-end embedded application** exercise on top of that NPU.
+**MNIST digits** (tiny-ViT + DS-CNN peer) were used to **prove out the fabric** — systolic array, DMA, host tiling, and int8 deploy path on the board. **Robot command** workloads built from [Google Speech Commands](https://www.tensorflow.org/datasets/catalog/speech_commands) (audio phrase peers + a text command-phrase LM over the same vocab) are the **end-to-end embedded application** on top of that NPU.
 
 Part of [NetKit Labs](https://github.com/NetKit-Labs) — companion to [netkit](https://github.com/NetKit-Labs/netkit) (MCU/MPU inference), focused here on **custom FPGA NPU** acceleration for edge transformers.
 
@@ -69,7 +69,7 @@ Full write-up: **[`docs/STATUS.md`](docs/STATUS.md)**. Speech peers: **[`docs/sp
 
 ## MNIST bring-up (sanity check only)
 
-MNIST was used to **exercise the FPGA fabric and host stack** (tiling, DMA, int8 GEMM, smoke notebooks) — not as the end application.
+MNIST was used to **bring up the FPGA fabric and host stack** (tiling, DMA, int8 GEMM, smoke notebooks) — not as the end application.
 
 | Peer | Role | Headline |
 |------|------|----------|
