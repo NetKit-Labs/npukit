@@ -1,6 +1,6 @@
 # NpuKit
 
-FPGA mini-NPU for the [PYNQ-Z2](https://www.tulembedded.com/FPGA/ProductsPYNQ-Z2.html) (Xilinx **Zynq-7020**): an **8×8 int8** output-stationary **systolic GEMM** (AXI4-Lite + AXI DMA) plus **transformer glue**, aimed at **edge robot command** workloads built from [Google Speech Commands](https://www.tensorflow.org/datasets/catalog/speech_commands) audio (and a text command-phrase LM over the same vocab).
+FPGA NPU for the [PYNQ-Z2](https://www.tulembedded.com/FPGA/ProductsPYNQ-Z2.html) (Xilinx **Zynq-7020**): an **8×8 int8** output-stationary **systolic GEMM** (AXI4-Lite + AXI DMA) plus **transformer glue**, aimed at **edge robot command** workloads built from [Google Speech Commands](https://www.tensorflow.org/datasets/catalog/speech_commands) audio (and a text command-phrase LM over the same vocab).
 
 **MNIST digit ViT / DS-CNN work was only a fabric sanity check** — used while bringing up the systolic array, DMA path, and host tiling on PYNQ-Z2. It is **not** the product target; the completed application track is **robotic speech commands**.
 

@@ -6,7 +6,7 @@ Geometry: **T=32 × D=32 × MLP=64 × L=6**, causal decoder, int8 GEMM on NpuKit
 
 ## What this is
 
-A small **causal transformer** over the [Google Speech Commands v2](https://www.tensorflow.org/datasets/catalog/speech_commands) word list (35 labels) plus a few robot glue tokens (`move`, `turn`, `me`). Training uses a **prefix-sharing** robot command inventory (`go left`, `turn on`, …).
+A **causal transformer** over the [Google Speech Commands v2](https://www.tensorflow.org/datasets/catalog/speech_commands) word list (35 labels) plus a few robot glue tokens (`move`, `turn`, `me`). Training uses a **prefix-sharing** robot command inventory (`go left`, `turn on`, …).
 
 Because many commands share prefixes (`go left` / `go right`), next-token accuracy is capped near ~55%. The headline robot metric is the **command/intent head** (mean-pool → 30-way classify), with the LM head kept as a sequential auxiliary — the setting where a DS-CNN peer needs awkward glue.
 
