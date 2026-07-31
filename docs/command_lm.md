@@ -1,4 +1,4 @@
-# Tiny command-phrase LM (Speech Commands vocab)
+# Command-phrase LM (Speech Commands vocab)
 
 **Status: complete (host).** Text-side robot intents over the Google Speech Commands vocab (companion to the [audio speech peers](speech_peers.md)). MNIST was bring-up only.
 
