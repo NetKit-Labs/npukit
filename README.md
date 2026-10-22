@@ -8,6 +8,14 @@ Part of [NetKit Labs](https://github.com/NetKit-Labs) — companion to [netkit](
 
 **Keywords:** FPGA · PYNQ-Z2 · Zynq-7020 · systolic array · int8 GEMM · NPU · AXI DMA · transformer · Google Speech Commands · robot commands · TinyML · QAT · DS-CNN · edge AI
 
+## Engineering Highlights
+
+- **FPGA bring-up on real hardware:** PYNQ-Z2 / Zynq-7020 implementation of an 8×8 int8→int32 systolic GEMM array at 100 MHz, controlled through AXI4-Lite with AXI DMA tile transfers ([board smoke procedure](#5-minute-board-bring-up), [hardware status](docs/STATUS.md#hardware-bring-up-platform)).
+- **Placed resource footprint:** The transformer-glue variant uses approximately **18–19% LUTs and 72 DSP slices** on the Zynq-7020, as reported for the placed design ([hierarchy and utilization](#hierarchy)).
+- **Verification:** RTL testbenches cover processing elements, the array, AXI-Lite, and glue operations; documented PYNQ board smoke covers matmul, glue, end-to-end, and tiny-ViT paths ([simulation](#simulate-host), [board checks](#5-minute-board-bring-up)).
+- **Measured design trade-off:** Layer-resident weight memory is functionally correct, but the recorded tiny-ViT path was ~10.0 ms/image versus ~9.8 ms using conventional A∥B transfers, so A∥B remains the default ([weight-bank measurements](docs/weight_stationary.md#host-policy-board-measured)).
+- **System partition:** Arm Cortex-A9 Linux host handles tiling, orchestration, and model glue while programmable logic accelerates int8 GEMM. Speech-command model comparisons are **host results**; full command-model board packaging remains future work ([design notes](#design-notes), [project status](docs/STATUS.md)).
+
 ## Robot commands (Google Speech Commands) — completed
 
 Host races on **stitched GSC WAVs** + shared log-mel (`sr=16k`, `n_fft=512`, `hop=256`, `n_mels=32`). Peers: **A** Fat/causal DS-CNN, **B** KWS+FSM, **C** hybrid DS-stem + transformer (HT). Details: [`docs/speech_peers.md`](docs/speech_peers.md), [`docs/command_lm.md`](docs/command_lm.md).
