@@ -109,12 +109,12 @@ module systolic_array_tb;
             end
         end
 
-        if (errors == 0)
+        if (errors == 0) begin
             $display("systolic_array_tb: ALL PASS (8x8 int8 matmul)");
-        else
-            $display("systolic_array_tb: %0d FAIL(s)", errors);
-
-        $finish;
+            $finish;
+        end else begin
+            $fatal(1, "systolic_array_tb: %0d FAIL(s)", errors);
+        end
     end
 
 endmodule

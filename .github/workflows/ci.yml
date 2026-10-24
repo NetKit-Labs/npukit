@@ -1,0 +1,44 @@
+# Hardware-free CI.
+# Not included: Vivado bitstream builds, PYNQ board smoke, model training,
+# and Google Speech Commands downloads. Those need a licensed tool, a board,
+# or a long dataset run.
+
+permissions:
+  contents: read
+
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rtl-sim:
+    name: RTL simulation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Icarus Verilog
+        run: sudo apt-get update && sudo apt-get install -y iverilog
+      - name: Simulate RTL
+        run: ./scripts/ci_sim.sh
+
+  host:
+    name: Host CPU checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install NumPy
+        run: python -m pip install "numpy>=1.26"
+      - name: Run host checks
+        run: ./scripts/ci_host.sh

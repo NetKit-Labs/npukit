@@ -308,12 +308,12 @@ module npukit_axil_tb;
             end
         end
 
-        if (errors == 0)
+        if (errors == 0) begin
             $display("npukit_axil_tb: ALL PASS");
-        else
-            $display("npukit_axil_tb: %0d FAIL(s)", errors);
-
-        $finish;
+            $finish;
+        end else begin
+            $fatal(1, "npukit_axil_tb: %0d FAIL(s)", errors);
+        end
     end
 
 endmodule

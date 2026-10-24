@@ -84,12 +84,12 @@ module pe_tb;
         @(posedge clk);
         check("clear again", acc, 0);
 
-        if (errors == 0)
+        if (errors == 0) begin
             $display("pe_tb: ALL PASS");
-        else
-            $display("pe_tb: %0d FAIL(s)", errors);
-
-        $finish;
+            $finish;
+        end else begin
+            $fatal(1, "pe_tb: %0d FAIL(s)", errors);
+        end
     end
 
 endmodule

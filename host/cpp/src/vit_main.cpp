@@ -92,6 +92,11 @@ int main(int argc, char** argv) {
     if (!w.samples.empty()) {
       std::printf("  agree_argmax %d/%zu  label_ok %d/%zu  max|err|=%d\n", match,
                   w.samples.size(), label_ok, w.samples.size(), max_abs);
+      // Float-glue CPU path matches the Python logits packed into the .bin.
+      if (match != static_cast<int>(w.samples.size()) || max_abs != 0) {
+        std::fprintf(stderr, "parity FAIL\n");
+        return 1;
+      }
     }
 
     // Latency

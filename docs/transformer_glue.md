@@ -99,6 +99,8 @@ iverilog -g2012 -o sim/npukit_glue_tb.vvp rtl/npukit_glue.sv sim/npukit_glue_tb.
 vvp sim/npukit_glue_tb.vvp
 ```
 
+GitHub Actions runs this testbench, along with the PE, array, and AXI-Lite benches, via `scripts/ci_sim.sh`.
+
 ## Tiny transformer dataflow (conceptual)
 
 ```

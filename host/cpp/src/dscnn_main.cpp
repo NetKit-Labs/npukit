@@ -61,6 +61,11 @@ int main(int argc, char** argv) {
     if (!w.samples.empty()) {
       std::printf("  agree_argmax %d/%zu  label_ok %d/%zu  max|err|=%.3g\n", match,
                   w.samples.size(), label_ok, w.samples.size(), max_abs);
+      // Python int8 reference is packed into the .bin; float noise stays ~1e-6.
+      if (match != static_cast<int>(w.samples.size()) || max_abs > 1e-4f) {
+        std::fprintf(stderr, "parity FAIL\n");
+        return 1;
+      }
     }
 
     std::vector<float> img(size_t(w.img) * w.img, 0.5f);

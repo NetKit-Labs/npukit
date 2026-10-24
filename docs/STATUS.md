@@ -72,6 +72,17 @@ Used to prove fabric + host before GSC work — **not** the deployment goal.
 | Host DS-CNN int8 peer | **~98.4%** / ~8.3 KiB |
 | ViT board n=64 pred agree | **100%** |
 
+## CI (no board)
+
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on Ubuntu for every push and pull request:
+
+| Job | What it checks |
+|-----|----------------|
+| RTL simulation | Icarus Verilog: PE, 8×8 array, glue, AXI-Lite (`scripts/ci_sim.sh`) |
+| Host CPU checks | NumPy glue / tiny-ViT / command-LM references, then `make HOST=1` C++ parity (`scripts/ci_host.sh`) |
+
+Vivado bitstreams, PYNQ board smoke, training, and Speech Commands downloads stay off CI.
+
 ## Still optionally valuable
 
 1. **Fair-race Fat RF CNN (no GAP) vs HT** — scaffolded; expect HT still wins

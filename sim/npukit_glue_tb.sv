@@ -111,8 +111,11 @@ module npukit_glue_tb;
             errors++;
         end
 
-        if (errors == 0) $display("npukit_glue_tb: ALL PASS");
-        else $display("npukit_glue_tb: FAIL (%0d)", errors);
-        $finish;
+        if (errors == 0) begin
+            $display("npukit_glue_tb: ALL PASS");
+            $finish;
+        end else begin
+            $fatal(1, "npukit_glue_tb: FAIL (%0d)", errors);
+        end
     end
 endmodule

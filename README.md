@@ -12,7 +12,7 @@ Part of [NetKit Labs](https://github.com/NetKit-Labs) — companion to [netkit](
 
 - **FPGA bring-up on real hardware:** PYNQ-Z2 / Zynq-7020 implementation of an 8×8 int8→int32 systolic GEMM array at 100 MHz, controlled through AXI4-Lite with AXI DMA tile transfers ([board smoke procedure](#5-minute-board-bring-up), [hardware status](docs/STATUS.md#hardware-bring-up-platform)).
 - **Placed resource footprint:** The transformer-glue variant uses approximately **18–19% LUTs and 72 DSP slices** on the Zynq-7020, as reported for the placed design ([hierarchy and utilization](#hierarchy)).
-- **Verification:** RTL testbenches cover processing elements, the array, AXI-Lite, and glue operations; documented PYNQ board smoke covers matmul, glue, end-to-end, and tiny-ViT paths ([simulation](#simulate-host), [board checks](#5-minute-board-bring-up)).
+- **Verification:** GitHub Actions runs the Icarus Verilog testbenches (processing element, array, AXI-Lite, glue) and the host CPU checks (NumPy references plus a C++ `HOST=1` parity build). PYNQ board smoke still covers matmul, glue, end-to-end, and tiny-ViT ([simulation](#simulate-host), [CI status](docs/STATUS.md#ci-no-board), [board checks](#5-minute-board-bring-up)).
 - **Measured design trade-off:** Layer-resident weight memory is functionally correct, but the recorded tiny-ViT path was ~10.0 ms/image versus ~9.8 ms using conventional A∥B transfers, so A∥B remains the default ([weight-bank measurements](docs/weight_stationary.md#host-policy-board-measured)).
 - **System partition:** Arm Cortex-A9 Linux host handles tiling, orchestration, and model glue while programmable logic accelerates int8 GEMM. Speech-command model comparisons are **host results**; full command-model board packaging remains future work ([design notes](#design-notes), [project status](docs/STATUS.md)).
 
@@ -155,7 +155,7 @@ AXIS packets are 16 packed `uint32` A words then 16 B words, with `TLAST` on wor
 ## Simulate (host)
 
 ```bash
-cd npukit
+# From the repository root (this directory).
 
 iverilog -g2012 -o sim/pe_tb.vvp rtl/pe.sv sim/pe_tb.sv && vvp sim/pe_tb.vvp
 
@@ -163,11 +163,21 @@ iverilog -g2012 -o sim/array_tb.vvp rtl/pe.sv rtl/systolic_array.sv sim/systolic
 vvp sim/array_tb.vvp
 
 iverilog -g2012 -o sim/npukit_axil_tb.vvp \
-  rtl/pe.sv rtl/systolic_array.sv rtl/npukit_axil.sv sim/npukit_axil_tb.sv
+  rtl/pe.sv rtl/systolic_array.sv rtl/npukit_glue.sv rtl/npukit_axil.sv \
+  sim/npukit_axil_tb.sv
 vvp sim/npukit_axil_tb.vvp
 ```
 
-Expect `ALL PASS` from each TB.
+Expect `ALL PASS` from each TB. A failing testbench calls `$fatal` so `vvp` exits non-zero.
+
+GitHub Actions runs those simulations, the glue testbench, and the host CPU checks:
+
+```bash
+./scripts/ci_sim.sh    # Icarus Verilog; needs iverilog and vvp
+./scripts/ci_host.sh   # NumPy references + C++ HOST=1 CPU parity; needs g++ and numpy
+```
+
+Workflow: [`.github/workflows/ci.yml`](.github/workflows/ci.yml). It does **not** build a bitstream, talk to a PYNQ, train models, or download Speech Commands.
 
 ## Build / load (board)
 

@@ -43,6 +43,8 @@ make clean && make HOST=1 npukit_vit npukit_dscnn
 
 Compares C++ logits to Python reference logits embedded in the `.bin`.
 
+GitHub Actions runs the same parity path with a few samples (`scripts/ci_host.sh`): ViT and DS-CNN must match the Python reference, and the command-LM binary must load and run on the CPU. The bench binary is compiled but not executed, because `HOST=1` has no `/dev/mem`.
+
 ## Fair peer latency (same C++ runtime)
 
 On the board, both peers are C++ CPU/FPGA drivers (not Python):
