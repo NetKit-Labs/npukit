@@ -14,7 +14,7 @@ Part of [NetKit Labs](https://github.com/NetKit-Labs) — companion to [netkit](
 - **Placed resource footprint:** The transformer-glue variant uses approximately **18–19% LUTs and 72 DSP slices** on the Zynq-7020, as reported for the placed design ([hierarchy and utilization](#hierarchy)).
 - **Verification:** GitHub Actions runs the Icarus Verilog testbenches (processing element, array, AXI-Lite, glue) and the host CPU checks (NumPy references plus a C++ `HOST=1` parity build). PYNQ board smoke still covers matmul, glue, end-to-end, and tiny-ViT ([simulation](#simulate-host), [CI status](docs/STATUS.md#ci-no-board), [board checks](#5-minute-board-bring-up)).
 - **Measured design trade-off:** Layer-resident weight memory is functionally correct, but the recorded tiny-ViT path was ~10.0 ms/image versus ~9.8 ms using conventional A∥B transfers, so A∥B remains the default ([weight-bank measurements](docs/weight_stationary.md#host-policy-board-measured)).
-- **System partition:** Arm Cortex-A9 Linux host handles tiling, orchestration, and model glue while programmable logic accelerates int8 GEMM. Speech-command model comparisons are **host results**; full command-model board packaging remains future work ([design notes](#design-notes), [project status](docs/STATUS.md)).
+- **System partition and measured trade-off:** The Arm Cortex-A9 Linux host handles data preparation, tiling, and non-GEMM operations while programmable logic accelerates INT8 GEMM. The fair robot-command transformer's **quantized body was also benchmarked on PYNQ-Z2** using precomputed stem tokens: Arm-side GEMM took ~1.97 s/phrase versus ~30.94 s/phrase with FPGA GEMM offload (~15.7× slower for this workload). Full live-audio deployment was not completed ([board benchmark](docs/speech_peers.md#pynq-z2-cpu-vs-fpga-gemm-benchmark), [status](docs/STATUS.md)).
 
 ## Robot commands (Google Speech Commands) — completed
 
@@ -66,12 +66,12 @@ python3 host/npukit_command_lm.py --phrase "go left"
 |:---:|---|
 | yes | **Hardware MVP** — 8×8 int8 GEMM + glue + DMA/AXI-Lite @ 100 MHz (`VERSION 0x302`) |
 | yes | Board smoke (matmul / glue / e2e / ViT path) — **ALL SMOKE PASS** |
-| yes | **GSC robot commands (audio peers)** — short / long / fair races complete — [`docs/speech_peers.md`](docs/speech_peers.md) |
+| yes | **GSC robot commands (audio peers)** — short / long / fair races complete; fair transformer body also profiled on PYNQ-Z2 — [`docs/speech_peers.md`](docs/speech_peers.md) |
 | yes | **GSC robot commands (text LM)** — intent head **100%** — [`docs/command_lm.md`](docs/command_lm.md) |
 | yes | Layer-resident weight bank (`FEAT_WMEM`); host default stays A∥B on tiny mats |
 | bring-up | MNIST tiny-ViT + DS-CNN peer — **sanity check only** while bringing up fabric (~98% digits) |
 | later | Optional fair-race **Fat RF CNN (no GAP) vs HT** (expect HT still wins) |
-| later | Board packs for command-LM / fair HT; close WMEM 100 MHz timing; MHA per-head scales |
+| later | End-to-end board speech front-end / command-LM application packaging; close WMEM 100 MHz timing; MHA per-head scales |
 
 Full write-up: **[`docs/STATUS.md`](docs/STATUS.md)**. Speech peers: **[`docs/speech_peers.md`](docs/speech_peers.md)**. WMEM: **[`docs/weight_stationary.md`](docs/weight_stationary.md)**.
 
