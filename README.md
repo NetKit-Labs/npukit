@@ -1,20 +1,20 @@
 # NpuKit
 
-**NpuKit** is an FPGA **NPU** for the [PYNQ-Z2](https://www.tulembedded.com/FPGA/ProductsPYNQ-Z2.html) (Xilinx **Zynq-7020**): an **8×8 int8** **output-stationary systolic** GEMM array with AXI4-Lite control, AXI DMA tile I/O, and on-fabric **transformer glue** (Softmax / RMSNorm / residual / GELU path) for tiny edge transformers.
+**NpuKit** is an FPGA **NPU** for the AMD/Xilinx **Zynq-7020** SoC: an **8×8 int8** **output-stationary systolic** GEMM array with AXI4-Lite control, AXI DMA tile I/O, and on-fabric **transformer glue** (Softmax / RMSNorm / residual / GELU path) for tiny edge transformers.
 
 **MNIST digits** (tiny-ViT + DS-CNN peer) were used to **prove out the fabric** — systolic array, DMA, host tiling, and int8 deploy path on the board. **Robot command** workloads built from [Google Speech Commands](https://www.tensorflow.org/datasets/catalog/speech_commands) (audio phrase peers + a text command-phrase LM over the same vocab) are the **end-to-end embedded application** on top of that NPU.
 
 Part of [NetKit Labs](https://github.com/NetKit-Labs) — companion to [netkit](https://github.com/NetKit-Labs/netkit) (MCU/MPU inference), focused here on **custom FPGA NPU** acceleration for edge transformers.
 
-**Keywords:** FPGA · PYNQ-Z2 · Zynq-7020 · systolic array · int8 GEMM · NPU · AXI DMA · transformer · Google Speech Commands · robot commands · TinyML · QAT · DS-CNN · edge AI
+**Keywords:** FPGA · Zynq-7020 · systolic array · int8 GEMM · NPU · AXI DMA · transformer · Google Speech Commands · robot commands · TinyML · QAT · DS-CNN · edge AI
 
 ## Engineering Highlights
 
-- **FPGA bring-up on real hardware:** PYNQ-Z2 / Zynq-7020 implementation of an 8×8 int8→int32 systolic GEMM array at 100 MHz, controlled through AXI4-Lite with AXI DMA tile transfers ([board smoke procedure](#5-minute-board-bring-up), [hardware status](docs/STATUS.md#hardware-bring-up-platform)).
+- **FPGA bring-up on real hardware:** Zynq-7020 implementation of an 8×8 int8→int32 systolic GEMM array at 100 MHz, controlled through AXI4-Lite with AXI DMA tile transfers ([board smoke procedure](#5-minute-board-bring-up), [hardware status](docs/STATUS.md#hardware-bring-up-platform)).
 - **Placed resource footprint:** The transformer-glue variant uses approximately **18–19% LUTs and 72 DSP slices** on the Zynq-7020, as reported for the placed design ([hierarchy and utilization](#hierarchy)).
-- **Verification:** GitHub Actions runs the Icarus Verilog testbenches (processing element, array, AXI-Lite, glue) and the host CPU checks (NumPy references plus a C++ `HOST=1` parity build). PYNQ board smoke still covers matmul, glue, end-to-end, and tiny-ViT ([simulation](#simulate-host), [CI status](docs/STATUS.md#ci-no-board), [board checks](#5-minute-board-bring-up)).
+- **Verification:** GitHub Actions runs the Icarus Verilog testbenches (processing element, array, AXI-Lite, glue) and the host CPU checks (NumPy references plus a C++ `HOST=1` parity build). On-board smoke testing still covers matmul, glue, end-to-end, and tiny-ViT ([simulation](#simulate-host), [CI status](docs/STATUS.md#ci-no-board), [board checks](#5-minute-board-bring-up)).
 - **Measured design trade-off:** Layer-resident weight memory is functionally correct, but the recorded tiny-ViT path was ~10.0 ms/image versus ~9.8 ms using conventional A∥B transfers, so A∥B remains the default ([weight-bank measurements](docs/weight_stationary.md#host-policy-board-measured)).
-- **System partition and measured trade-off:** The Arm Cortex-A9 Linux host handles data preparation, tiling, and non-GEMM operations while programmable logic accelerates INT8 GEMM. The fair robot-command transformer's **quantized body was also benchmarked on PYNQ-Z2** using precomputed stem tokens: Arm-side GEMM took ~1.97 s/phrase versus ~30.94 s/phrase with FPGA GEMM offload (~15.7× slower for this workload). Full live-audio deployment was not completed ([board benchmark](docs/speech_peers.md#pynq-z2-cpu-vs-fpga-gemm-benchmark), [status](docs/STATUS.md)).
+- **System partition and measured trade-off:** The Arm Cortex-A9 Linux host handles data preparation, tiling, and non-GEMM operations while programmable logic accelerates INT8 GEMM. The fair robot-command transformer's **quantized body was also benchmarked on Zynq-7020** using precomputed stem tokens: Arm-side GEMM took ~1.97 s/phrase versus ~30.94 s/phrase with FPGA GEMM offload (~15.7× slower for this workload). Full live-audio deployment was not completed ([board benchmark](docs/speech_peers.md#pynq-z2-cpu-vs-fpga-gemm-benchmark), [status](docs/STATUS.md)).
 
 ## Robot commands (Google Speech Commands) — completed
 
@@ -66,7 +66,7 @@ python3 host/npukit_command_lm.py --phrase "go left"
 |:---:|---|
 | yes | **Hardware MVP** — 8×8 int8 GEMM + glue + DMA/AXI-Lite @ 100 MHz (`VERSION 0x302`) |
 | yes | Board smoke (matmul / glue / e2e / ViT path) — **ALL SMOKE PASS** |
-| yes | **GSC robot commands (audio peers)** — short / long / fair races complete; fair transformer body also profiled on PYNQ-Z2 — [`docs/speech_peers.md`](docs/speech_peers.md) |
+| yes | **GSC robot commands (audio peers)** — short / long / fair races complete; fair transformer body also profiled on Zynq-7020 — [`docs/speech_peers.md`](docs/speech_peers.md) |
 | yes | **GSC robot commands (text LM)** — intent head **100%** — [`docs/command_lm.md`](docs/command_lm.md) |
 | yes | Layer-resident weight bank (`FEAT_WMEM`); host default stays A∥B on tiny mats |
 | bring-up | MNIST tiny-ViT + DS-CNN peer — **sanity check only** while bringing up fabric (~98% digits) |
@@ -218,7 +218,7 @@ python /home/xilinx/jupyter_notebooks/npukit_board_smoke.py \
 # or open npukit_board_smoke.ipynb, Run All, then save
 ```
 
-**Jupyter:** open `npukit_matmul.ipynb` and run all cells. The notebook is an interactive wrapper around `npukit_matmul.py` (classic 8×8 suite + tiled MxKxN). Matrix data is always built in Python (e.g. `classic_8x8_cases()` / `tiled_cases()`), never loaded from the `.bit`. A checked-in board run on PYNQ-Z2 (DMA transport) shows **12/12 PASS**, including tiled **16×16** and **32×32×32**, with verbose A/B/C dumps left in the cell outputs.
+**Jupyter:** open `npukit_matmul.ipynb` and run all cells. The notebook is an interactive wrapper around `npukit_matmul.py` (classic 8×8 suite + tiled MxKxN). Matrix data is always built in Python (e.g. `classic_8x8_cases()` / `tiled_cases()`), never loaded from the `.bit`. A checked-in board run on Zynq-7020 (DMA transport) shows **12/12 PASS**, including tiled **16×16** and **32×32×32**, with verbose A/B/C dumps left in the cell outputs.
 
 **PS ↔ PL paths (keep both):**
 
