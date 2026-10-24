@@ -1,4 +1,4 @@
-# NpuKit C++ driver (PYNQ-Z2)
+# NpuKit C++ driver (Zynq-7020)
 
 Userspace driver with **no Python in the GEMM kick loop**:
 
