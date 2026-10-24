@@ -70,6 +70,21 @@ Results (`host/speech_peers_metrics_fair.json`):
 
 On this setup **C wins cleanly** — blocking the CNN bag + giving the transformer resolution/sequential aux flips the earlier long-phrase story.
 
+### PYNQ-Z2 CPU vs FPGA GEMM benchmark
+
+The final fair Hybrid Transformer (**T=128, D=32, L=6**) was **also evaluated on the PYNQ-Z2**, not solely on a desktop. [`ht_fair_board_eval.py`](../host/ht_fair_board_eval.py) benchmarks its quantized transformer body with GEMM either computed on the Arm Cortex-A9 host or offloaded to the FPGA 8×8 INT8 systolic array via the board bitstream. Other transformer operations remain in host software (`glue_mode="float"`). The model's speech stem was run ahead of time to export token tensors, so this was **not** a complete live-audio pipeline on the board.
+
+Results saved in [`speech_peers_fair_board.json`](../host/speech_peers_fair_board.json) (`bit: /home/xilinx/jupyter_notebooks/npukit.bit`):
+
+| PYNQ-Z2 execution path | Samples evaluated | Correct | Time / phrase |
+|------------------------|------------------:|--------:|--------------:|
+| Arm CPU, INT8 tiled GEMM | 64 | 96.875% | ~1.97 s |
+| Arm host + FPGA, INT8 tiled GEMM | 16 | 100% | ~30.94 s |
+
+**Engineering decision:** FPGA GEMM offload was **~15.7× slower** for this measured workload, so the Arm CPU path was the more practical choice without reworking the dataflow and transfer overhead. The 8×8 array can process larger matrices by tiling, but T=128 and six layers produce many small accelerator transactions; the FPGA transformer glue also supports vectors only up to `MAX_LEN=16`, requiring longer-vector operations on the CPU. The different sample counts mean the accuracy percentages above are **not** a head-to-head accuracy comparison. The earlier short-phrase FPGA experiment likewise documented substantial AXI tile overhead (~5.2 s FPGA versus ~0.5 s CPU per phrase).
+
+The Torch 96.5% / 15.4 ms results above are **separate model-comparison measurements** and should not be confused with the PYNQ CPU/FPGA INT8 timings.
+
 **Optional follow-up (not run):** `FatRFCNN` in `host/speech_peers.py` — Fat CNN with a **large receptive field** over the utterance and **no GAP**, on this same fair set vs HT. Expected to underperform HT on order-only permutations (same lesson as the 27.8% causal CNN).
 
 ```bash
