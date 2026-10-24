@@ -14,11 +14,11 @@ Build an NPU on PYNQ-Z2: an **8×8 int8 systolic array**, built and verified the
 
 The **GEMM hardware MVP is complete**. Transformer **glue** (from VERSION `0x300`: residual / GELU / RMSNorm / Softmax, `MAX_LEN=16`) meets **100 MHz** and passes on PYNQ-Z2 with `host/npukit_transformer.py`. Current bitstreams are **`VERSION 0x302`**: weight-stationary + A ping-pong (`FEAT_WS|PP`) and **layer-resident weight bank** (`FEAT_WMEM` — load full `K×N` once, stream A-only). Host default stays A∥B on tiny-ViT; opt in with `NPUKIT_WMEM=1`. See [`docs/weight_stationary.md`](docs/weight_stationary.md).
 
-**Application track (complete on host):** Google Speech Commands **robot commands** — audio peers (short / long / fair) + text command-phrase LM. Fair order-only: hybrid transformer **96.5%** vs causal CNN **27.8%**. See [`docs/speech_peers.md`](docs/speech_peers.md), [`docs/command_lm.md`](docs/command_lm.md), and the results tables in [`README.md`](README.md).
+**Application track (host metrics complete; fair-model body also tested on board):** Google Speech Commands **robot commands** — audio peers (short / long / fair) + text command-phrase LM. Fair order-only: hybrid transformer **96.5%** vs causal CNN **27.8%**. For the quantized `T=128` fair-model body on the PYNQ-Z2, Arm CPU INT8 GEMM ran at **~1.97 s/phrase** versus **~30.94 s/phrase** with FPGA GEMM (~15.7× slower), informing the CPU-vs-PL partition choice; the board used precomputed speech tokens, not a complete live-audio pipeline. See [`docs/speech_peers.md`](docs/speech_peers.md#pynq-z2-cpu-vs-fpga-gemm-benchmark), [`docs/command_lm.md`](docs/command_lm.md), and [`README.md`](README.md).
 
 **MNIST (bring-up only):** tiny-ViT + DS-CNN digit peers were a **fabric sanity check** while bringing up GEMM/DMA/tiling (~98% digits). Not the product target.
 
-**Optional later:** fair-race **Fat RF CNN (large RF, no GAP) vs HT** (scaffolded in `host/speech_peers.py`; expect HT still wins); board packs for command-LM / fair HT; close WMEM 100 MHz timing; per-head scales (MHA); larger PE grid / model.
+**Optional later:** fair-race **Fat RF CNN (large RF, no GAP) vs HT** (scaffolded in `host/speech_peers.py`; expect HT still wins); complete speech front-end / command-LM on-board application packaging; close WMEM 100 MHz timing; per-head scales (MHA); larger PE grid / model.
 
 Docs: status [`docs/STATUS.md`](docs/STATUS.md), speech peers [`docs/speech_peers.md`](docs/speech_peers.md), command LM [`docs/command_lm.md`](docs/command_lm.md), WMEM/WS [`docs/weight_stationary.md`](docs/weight_stationary.md), FPGA vs CPU [`docs/transformer_split.md`](docs/transformer_split.md), glue [`docs/transformer_glue.md`](docs/transformer_glue.md), bring-up [`docs/glue_bringup.md`](docs/glue_bringup.md), tiling [`docs/tiling.md`](docs/tiling.md).
 
@@ -82,7 +82,7 @@ An int8 8×8 GEMM covers MLP/FC and 1×1 conv; standard conv can be lowered to G
 - Synthetic 1-layer e2e T=8×D=8: **done** (**ALL E2E PASS** in `host/npukit_transformer_e2e.ipynb`).
 - MNIST tiny-ViT T=16×D=16×MLP32×L=4 + per-channel scales + deploy-faithful QAT: **done** (numpy/full test **~98.0%**; board **ALL VIT PASS**; see [`docs/STATUS.md`](docs/STATUS.md)).
 - Host DS-CNN MNIST reference: **done** as bring-up only (float **98.00%** / int8 **98.39%**).
-- GSC robot commands (text LM + audio peers short/long/fair): **done** on host — see [`README.md`](README.md) results tables.
+- GSC robot commands (text LM + audio peers short/long/fair): **done** on host; fair HT body **benchmarked on PYNQ-Z2** (Arm CPU GEMM faster than FPGA GEMM for this workload) — see [`docs/speech_peers.md`](docs/speech_peers.md#pynq-z2-cpu-vs-fpga-gemm-benchmark).
 - Rebuild with `../scripts/build_bitstream.sh npukit` (or in-repo `scripts/`) after RTL/BD changes.
 
 ### Z7020 size note
