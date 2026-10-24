@@ -1,12 +1,12 @@
 # NpuKit status
 
-Checkpoint **2026-07-28**: **robotic Google Speech Commands** tracks are **complete** on the host; MNIST was only a **fabric / bring-up sanity check**. An optional **Fat RF CNN vs HT** fair-race comparison is scaffolded but **not finished**.
+Checkpoint **2026-07-28**: **robotic Google Speech Commands** model comparisons are **complete on the host**, and the fair Hybrid Transformer's quantized body was also benchmarked on **PYNQ-Z2 (Arm CPU GEMM versus FPGA GEMM)** using precomputed stem tokens. A full live-audio board application was not completed. MNIST was only a **fabric / bring-up sanity check**. An optional **Fat RF CNN vs HT** fair-race comparison is scaffolded but **not finished**.
 
 ## Product track vs bring-up
 
 | Track | Role | Status |
 |-------|------|--------|
-| **GSC robot commands (audio + text)** | Target application story | **Complete** (host metrics) |
+| **GSC robot commands (audio + text)** | Target application story | Host metrics complete; fair HT body benchmarked on PYNQ-Z2 |
 | **MNIST tiny-ViT / DS-CNN** | Sanity check while bringing up systolic GEMM, DMA, tiling | Done — **not** the product target |
 | **Hardware MVP** (`VERSION 0x302`) | 8×8 int8 GEMM + glue + WMEM | Board green |
 | **Fat RF CNN vs HT** (fair 8-word) | Extra CNN baseline (large RF, no GAP) | **Optional / pending** — expect HT still wins |
@@ -33,6 +33,8 @@ Fair race detail (order is the only class cue; same word multiset, permutations)
 | **C Hybrid transformer** | **96.5%** | **97,408** | **380.5** | **95.1** | **15.4** |
 
 Takeaway: bag/content CNNs win short/long when phrases differ in words; when **order** is all that matters, **HT wins cleanly**.
+
+**PYNQ performance result:** The fair HT (`T=128, D=32, L=6`) was evaluated on precomputed speech-stem tokens using the board's Arm CPU and FPGA GEMM accelerator. The saved benchmark reports **~1.97 s/phrase on Arm CPU INT8 GEMM** versus **~30.94 s/phrase with FPGA GEMM offload** (~15.7× slower). These are inference-path measurements, distinct from the Torch timings above. The FPGA path's overhead favored leaving this workload on the CPU without further interface/dataflow optimization. See [`speech_peers.md`](speech_peers.md#pynq-z2-cpu-vs-fpga-gemm-benchmark) and [`speech_peers_fair_board.json`](../host/speech_peers_fair_board.json).
 
 ### Optional next comparison (not run)
 
@@ -86,7 +88,7 @@ Vivado bitstreams, PYNQ board smoke, training, and Speech Commands downloads sta
 ## Still optionally valuable
 
 1. **Fair-race Fat RF CNN (no GAP) vs HT** — scaffolded; expect HT still wins
-2. Board bring-up for command-LM / fair HT packs on PYNQ
+2. Full speech-front-end and command-LM application packaging on PYNQ (fair HT quantized body already benchmarked on board)
 3. Close **100 MHz timing** on the WMEM bitstream
 4. Multi-head attention + per-head scales
 5. Larger PE grid only after host traffic is no longer the limit
