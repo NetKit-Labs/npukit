@@ -42,3 +42,17 @@ jobs:
         run: python -m pip install "numpy>=1.26"
       - name: Run host checks
         run: ./scripts/ci_host.sh
+
+  cppcheck:
+      name: Cppcheck static analysis
+      runs-on: ubuntu-24.04
+      timeout-minutes: 10
+      steps:
+        - uses: actions/checkout@v4
+        - name: Install Cppcheck
+          run: sudo apt-get update && sudo apt-get install -y cppcheck
+        - name: Analyze project-owned C/C++ sources
+          run: |
+            cppcheck --error-exitcode=1 --quiet --enable=warning,performance,portability \
+              --inline-suppr --suppress=missingIncludeSystem --std=c++17 \
+              -Ihost/cpp/include host/cpp/include host/cpp/src
